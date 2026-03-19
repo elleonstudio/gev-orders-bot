@@ -194,10 +194,10 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Цена клиенту (¥)": {"number": int(prod['price_per_unit'])},
                     "Цена закупки (¥)": {"number": int(prod['purchase'] / qty)},
                     "Закупка реальная (¥)": {"number": total_purchase},
-                    "Счёт клиенту (¥)": {"number": total_client},
+                    "Счёт клиенту (֏)": {"number": total_client},
                     "Курс клиенту": {"number": orders_data[user_id]['client_rate']},
                     "Курс реальный": {"number": rate},
-                    "Маржа (¥)": {"number": margin},
+                    "Маржа (֏)": {"number": margin},
                     "Статус": {"select": {"name": "Поиск — жду цену"}},
                 }
             )
@@ -207,9 +207,9 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Клиент: {orders_data[user_id]['client']}
 Товаров: {len(orders_data[user_id]['products'])}
 Общее кол-во: {total_qty} шт
-Счёт клиенту: {total_client}¥
+Счёт клиенту: {total_client}֏
 Закупка: {total_purchase}¥
-Маржа: {margin}¥
+Маржа: {margin}֏
 
 Сохранено в Notion!"""
             await update.message.reply_text(summary)
