@@ -21,7 +21,7 @@ NOTION_DATABASE_ID = os.getenv('NOTION_DATABASE_ID')
 notion = Client(auth=NOTION_TOKEN)
 
 # Состояния для ConversationHandler
-CLIENT_NAME, PRODUCT_NAME, CLIENT_PRICE, DELIVERY_PRICE, PURCHASE_PRICE, PHOTO, MORE_PRODUCTS, CLIENT_RATE, REAL_RATE = range(9)
+CLIENT_NAME, PRODUCT_NAME, QUANTITY, CLIENT_PRICE, DELIVERY_PRICE, PURCHASE_PRICE, PHOTO, MORE_PRODUCTS, CLIENT_RATE, REAL_RATE = range(10)
 
 # Временное хранилище заказов
 orders_data = {}
@@ -69,21 +69,45 @@ async def get_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     orders_data[user_id]['current_product']['name'] = update.message.text
     
-    await update.message.reply_text('Цена клиенту (¥):')
-    return CLIENT_PRICE
+    await update.message.reply_text('Количество:')
+    return QUANTITY
 
-async def get_client_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получаем цену клиенту"""
+async def get_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получаем количество товара"""
     user_id = update.effective_user.id
     try:
-        price = float(update.message.text)
-        orders_data[user_id]['current_product']['client_price'] = price
+        quantity = int(update.message.text)
+        if quantity <= 0:
+            await update.message.reply_text('Введи число больше 0:')
+            return QUANTITY
         
-        await update.message.reply_text('Доставка (¥):')
+        orders_data[user_id]['current_product']['quantity'] = quantity
+        
+        await update.message.reply_text('Цена за 1 шт. клиенту (¥):')
+        return CLIENT_PRICE
+    except ValueError:
+        await update.message.reply_text('Введи целое число:')
+        return QUANTITY
+
+
+async def get_client_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получаем цену клиенту и умножаем на количество"""
+    user_id = update.effective_user.id
+    try:
+        price_per_unit = float(update.message.text)
+        quantity = orders_data[user_id]['current_product'].get('quantity', 1)
+        
+        # Общая цена = цена за шт × количество
+        total_price = price_per_unit * quantity
+        orders_data[user_id]['current_product']['client_price'] = total_price
+        orders_data[user_id]['current_product']['price_per_unit'] = price_per_unit
+        
+        await update.message.reply_text(f'Цена за {quantity} шт: {total_price}¥\n\nДоставка (¥):')
         return DELIVERY_PRICE
     except ValueError:
         await update.message.reply_text('Введи число:')
         return CLIENT_PRICE
+
 
 async def get_delivery_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Получаем цену доставки"""
