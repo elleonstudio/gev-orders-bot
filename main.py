@@ -168,37 +168,48 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_code = generate_order_code(orders_data[user_id]['client'])
         orders_data[user_id]['order_code'] = order_code
         
+        # Считаем итоговые суммы
+        total_qty = 0
+        total_client = 0
+        total_purchase = 0
         products_text = []
-        client_prices = []
-        purchase_prices = []
         
         for i, prod in enumerate(orders_data[user_id]['products'], 1):
             qty = prod.get('quantity', 1)
-            unit_price = prod.get('price_per_unit', prod['client_price'])
+            total_qty += qty
+            total_client += prod['client_price'] + prod['delivery']
+            total_purchase += prod['purchase']
             products_text.append(f"{i}. {prod['name']} (×{qty})")
-            client_prices.append(f"{unit_price}×{qty}={prod['client_price']}+{prod['delivery']}")
-            purchase_prices.append(str(prod['purchase']))
+        
+        # Считаем маржу
+        margin = total_client - total_purchase
         
         try:
             notion.pages.create(
                 parent={"database_id": NOTION_DATABASE_ID},
                 properties={
-                    "Код заказа": {"title": [{"text": {"content": order_code}}]},
                     "Клиент": {"select": {"name": orders_data[user_id]['client']}},
-                    "Описание товаров": {"rich_text": [{"text": {"content": "; ".join(products_text)}}]},
-                    "Цены клиенту": {"rich_text": [{"text": {"content": "; ".join(client_prices)}}]},
-                    "Цены закупки": {"rich_text": [{"text": {"content": "; ".join(purchase_prices)}}]},
-                    "Курсы": {"rich_text": [{"text": {"content": f"{orders_data[user_id]['client_rate']} / {rate}"}}]},
-                    "Статус": {"select": {"name": "Поиск"}},
-                    "Код карго": {"rich_text": [{"text": {"content": ""}}]},
+                    "Описание товара": {"title": [{"text": {"content": "; ".join(products_text)}}]},
+                    "Количество": {"number": total_qty},
+                    "Цена клиенту (¥)": {"number": int(prod['price_per_unit'])},
+                    "Цена закупки (¥)": {"number": int(prod['purchase'] / qty)},
+                    "Закупка реальная (¥)": {"number": total_purchase},
+                    "Счёт клиенту (¥)": {"number": total_client},
+                    "Курс клиенту": {"number": orders_data[user_id]['client_rate']},
+                    "Курс реальный": {"number": rate},
+                    "Маржа (¥)": {"number": margin},
+                    "Статус": {"select": {"name": "Поиск — жду цену"}},
                 }
             )
             
-            summary = f"""Заказ создан: {order_code}
+            summary = f"""✅ Заказ создан!
 
 Клиент: {orders_data[user_id]['client']}
 Товаров: {len(orders_data[user_id]['products'])}
-Курсы: {orders_data[user_id]['client_rate']} / {rate}
+Общее кол-во: {total_qty} шт
+Счёт клиенту: {total_client}¥
+Закупка: {total_purchase}¥
+Маржа: {margin}¥
 
 Сохранено в Notion!"""
             await update.message.reply_text(summary)
@@ -231,9 +242,8 @@ async def search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             database_id=NOTION_DATABASE_ID,
             filter={
                 "or": [
-                    {"property": "Описание товаров", "rich_text": {"contains": query}},
-                    {"property": "Клиент", "select": {"equals": query}},
-                    {"property": "Код заказа", "title": {"contains": query}}
+                    {"property": "Описание товара", "title": {"contains": query}},
+                    {"property": "Клиент", "select": {"equals": query}}
                 ]
             }
         )
@@ -244,10 +254,10 @@ async def search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f'Найдено {len(results)} заказов:\n\n'
         for page in results[:5]:
             props = page['properties']
-            code = props['Код заказа']['title'][0]['text']['content'] if props['Код заказа']['title'] else 'Без кода'
+            desc = props['Описание товара']['title'][0]['text']['content'] if props['Описание товара']['title'] else 'Без описания'
             client = props['Клиент']['select']['name'] if props['Клиент']['select'] else 'Неизвестно'
             status = props['Статус']['select']['name'] if props['Статус']['select'] else '—'
-            text += f'{code}\nКлиент: {client}\nСтатус: {status}\n\n'
+            text += f'{desc}\nКлиент: {client}\nСтатус: {status}\n\n'
         await update.message.reply_text(text)
     except Exception as e:
         logging.error(f"Search error: {e}")
