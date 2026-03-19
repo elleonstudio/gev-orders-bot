@@ -266,6 +266,11 @@ async def search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
+    # Простые команды для теста
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('test', lambda u, c: u.message.reply_text('Тест работает!')))
+    
+    # ConversationHandler для заказов
     order_conv = ConversationHandler(
         entry_points=[CommandHandler('zakaz', start_order)],
         states={
@@ -282,9 +287,9 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)],
     )
     
-    application.add_handler(CommandHandler('start', start))
     application.add_handler(order_conv)
     application.add_handler(CommandHandler(['nayti', 'find'], search_orders))
+    
     application.run_polling()
 
 if __name__ == '__main__':
