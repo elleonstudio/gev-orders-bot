@@ -189,11 +189,11 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parent={"database_id": NOTION_DATABASE_ID},
                 properties={
                     "Клиент": {"select": {"name": orders_data[user_id]['client']}},
-                    "Описание товара": {"title": [{"text": {"content": "; ".join(products_text)}}]},
+                    "Описание товара": {"rich_text": [{"text": {"content": "; ".join(products_text)}}]},
                     "Количество": {"number": total_qty},
                     "Цена клиенту (¥)": {"number": int(prod['price_per_unit'])},
                     "Цена закупки (¥)": {"number": int(prod['purchase'] / qty)},
-                    "Закупка реальная (¥)": {"number": total_purchase},
+                    "Закупка реальная (֏)": {"number": total_purchase},
                     "Счёт клиенту (֏)": {"number": total_client},
                     "Курс клиенту": {"number": orders_data[user_id]['client_rate']},
                     "Курс реальный": {"number": rate},
@@ -242,7 +242,7 @@ async def search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             database_id=NOTION_DATABASE_ID,
             filter={
                 "or": [
-                    {"property": "Описание товара", "title": {"contains": query}},
+                    {"property": "Описание товара", "rich_text": {"contains": query}},
                     {"property": "Клиент", "select": {"equals": query}}
                 ]
             }
@@ -254,7 +254,7 @@ async def search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f'Найдено {len(results)} заказов:\n\n'
         for page in results[:5]:
             props = page['properties']
-            desc = props['Описание товара']['title'][0]['text']['content'] if props['Описание товара']['title'] else 'Без описания'
+            desc = props['Описание товара']['rich_text'][0]['text']['content'] if props['Описание товара']['rich_text'] else 'Без описания'
             client = props['Клиент']['select']['name'] if props['Клиент']['select'] else 'Неизвестно'
             status = props['Статус']['select']['name'] if props['Статус']['select'] else '—'
             text += f'{desc}\nКлиент: {client}\nСтатус: {status}\n\n'
