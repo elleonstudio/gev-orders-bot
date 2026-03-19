@@ -38,18 +38,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         'Привет! Я бот для учёта заказов.\n\n'
         'Команды:\n'
-        '/заказ [имя клиента] - создать новый заказ\n'
-        '/найти [запрос] - найти заказы\n'
-        '/[код] - найти по коду карго\n'
+        '/zakaz [имя клиента] - создать новый заказ\n'
+        '/nayti [запрос] - найти заказы\n'
     )
 
 async def start_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало создания заказа: /заказ Имя"""
+    """Начало создания заказа: /zakaz Имя"""
     message_text = update.message.text
     parts = message_text.split(maxsplit=1)
     
     if len(parts) < 2:
-        await update.message.reply_text('Укажи имя клиента: /заказ Петя')
+        await update.message.reply_text('Укажи имя клиента: /zakaz Петя')
         return ConversationHandler.END
     
     client_name = parts[1].strip()
@@ -209,13 +208,13 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Цены клиенту": {"rich_text": [{"text": {"content": "; ".join(client_prices)}}]},
                     "Цены закупки": {"rich_text": [{"text": {"content": "; ".join(purchase_prices)}}]},
                     "Курсы": {"rich_text": [{"text": {"content": f"{orders_data[user_id]['client_rate']} / {rate}"}}]},
-                    "Статус": {"select": {"name": "🔍 Поиск"}},
+                    "Статус": {"select": {"name": "Поиск"}},
                     "Код карго": {"rich_text": [{"text": {"content": ""}}]},
                 }
             )
             
             # Отправляем подтверждение
-            summary = f"""✅ Заказ создан: {order_code}
+            summary = f"""Заказ создан: {order_code}
 
 Клиент: {orders_data[user_id]['client']}
 Товаров: {len(orders_data[user_id]['products'])}
@@ -246,11 +245,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Поиск заказов: /найти запрос"""
-    query = update.message.text.replace('/найти', '').replace('/find', '').strip()
+    """Поиск заказов: /nayti запрос"""
+    query = update.message.text.replace('/nayti', '').replace('/find', '').strip()
     
     if not query:
-        await update.message.reply_text('Укажи что искать: /найти nike')
+        await update.message.reply_text('Укажи что искать: /nayti nike')
         return
     
     try:
@@ -289,7 +288,7 @@ async def search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             client = props['Клиент']['select']['name'] if props['Клиент']['select'] else 'Неизвестно'
             status = props['Статус']['select']['name'] if props['Статус']['select'] else '—'
             
-            text += f'📦 {code}\nКлиент: {client}\nСтатус: {status}\n\n'
+            text += f'{code}\nКлиент: {client}\nСтатус: {status}\n\n'
         
         await update.message.reply_text(text)
         
@@ -302,7 +301,7 @@ def main():
     
     # Conversation handler для создания заказа
     order_conv = ConversationHandler(
-        entry_points=[CommandHandler('заказ', start_order)],
+        entry_points=[CommandHandler('zakaz', start_order)],
         states={
             PRODUCT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_product_name)],
             CLIENT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_price)],
@@ -318,7 +317,7 @@ def main():
     
     application.add_handler(CommandHandler('start', start))
     application.add_handler(order_conv)
-    application.add_handler(CommandHandler(['найти', 'find'], search_orders))
+    application.add_handler(CommandHandler(['nayti', 'find'], search_orders))
     
     application.run_polling()
 
