@@ -30,7 +30,6 @@ def generate_order_code(client_name):
     """Генерирует код заказа: ИМЯ-ДДММГГ-НОМЕР"""
     today = datetime.now()
     date_str = today.strftime("%d%m%y")
-    # Простой счётчик для демо (в реальном боте нужна база данных)
     return f"{client_name.upper()}-{date_str}-1"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -54,7 +53,6 @@ async def start_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client_name = parts[1].strip()
     user_id = update.effective_user.id
     
-    # Инициализируем заказ
     orders_data[user_id] = {
         'client': client_name,
         'products': [],
@@ -89,7 +87,6 @@ async def get_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('Введи целое число:')
         return QUANTITY
 
-
 async def get_client_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Получаем цену клиенту и умножаем на количество"""
     user_id = update.effective_user.id
@@ -97,7 +94,6 @@ async def get_client_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price_per_unit = float(update.message.text)
         quantity = orders_data[user_id]['current_product'].get('quantity', 1)
         
-        # Общая цена = цена за шт × количество
         total_price = price_per_unit * quantity
         orders_data[user_id]['current_product']['client_price'] = total_price
         orders_data[user_id]['current_product']['price_per_unit'] = price_per_unit
@@ -107,7 +103,6 @@ async def get_client_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text('Введи число:')
         return CLIENT_PRICE
-
 
 async def get_delivery_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Получаем цену доставки"""
@@ -140,7 +135,6 @@ async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     if update.message.photo:
-        # Сохраняем file_id фото
         photo_file_id = update.message.photo[-1].file_id
         orders_data[user_id]['current_product']['photo'] = photo_file_id
         
@@ -174,16 +168,13 @@ async def more_products_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     user_id = update.effective_user.id
     
-    # Сохраняем текущий товар
     orders_data[user_id]['products'].append(orders_data[user_id]['current_product'])
     
     if query.data == 'yes':
-        # Новый товар
         orders_data[user_id]['current_product'] = {}
         await query.edit_message_text('Введи название товара (подробно):')
         return PRODUCT_NAME
     else:
-        # Переходим к курсам
         await query.edit_message_text('Курс клиенту? (например: 58)')
         return CLIENT_RATE
 
@@ -207,21 +198,20 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rate = float(update.message.text)
         orders_data[user_id]['real_rate'] = rate
         
-        # Генерируем код заказа
         order_code = generate_order_code(orders_data[user_id]['client'])
         orders_data[user_id]['order_code'] = order_code
         
-        # Формируем данные для Notion
         products_text = []
         client_prices = []
         purchase_prices = []
         
         for i, prod in enumerate(orders_data[user_id]['products'], 1):
-            products_text.append(f"{i}. {prod['name']}")
-            client_prices.append(f"{prod['client_price']}+{prod['delivery']}")
+            qty = prod.get('quantity', 1)
+            unit_price = prod.get('price_per_unit', prod['client_price'])
+            products_text.append(f"{i}. {prod['name']} (×{qty})")
+            client_prices.append(f"{unit_price}×{qty}={prod['client_price']}+{prod['delivery']}")
             purchase_prices.append(str(prod['purchase']))
         
-        # Создаём страницу в Notion
         try:
             new_page = notion.pages.create(
                 parent={"database_id": NOTION_DATABASE_ID},
@@ -237,7 +227,6 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 }
             )
             
-            # Отправляем подтверждение
             summary = f"""Заказ создан: {order_code}
 
 Клиент: {orders_data[user_id]['client']}
@@ -252,7 +241,6 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.error(f"Notion error: {e}")
             await update.message.reply_text(f'Ошибка сохранения в Notion: {e}')
         
-        # Очищаем данные
         del orders_data[user_id]
         return ConversationHandler.END
         
@@ -277,7 +265,6 @@ async def search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # Ищем в Notion
         response = notion.databases.query(
             database_id=NOTION_DATABASE_ID,
             filter={
@@ -304,9 +291,8 @@ async def search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f'Ничего не найдено по запросу: {query}')
             return
         
-        # Формируем ответ
         text = f'Найдено {len(results)} заказов:\n\n'
-        for page in results[:5]:  # Показываем первые 5
+        for page in results[:5]:
             props = page['properties']
             code = props['Код заказа']['title'][0]['text']['content'] if props['Код заказа']['title'] else 'Без кода'
             client = props['Клиент']['select']['name'] if props['Клиент']['select'] else 'Неизвестно'
@@ -323,11 +309,11 @@ async def search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # Conversation handler для создания заказа
     order_conv = ConversationHandler(
         entry_points=[CommandHandler('zakaz', start_order)],
         states={
             PRODUCT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_product_name)],
+            QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_quantity)],
             CLIENT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_price)],
             DELIVERY_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_delivery_price)],
             PURCHASE_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_purchase_price)],
