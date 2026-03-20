@@ -309,7 +309,7 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
             "Прибыль (֏)": {"number": int(profit_dram)},
             "Счёт клиенту (֏)": {"number": int(client_bill_dram)},
             "Клиент": {"select": {"name": client}},
-            "Дата": {"date": {"start": datetime.now().isoformat()}},
+            
             "Статус": {"select": {"name": "Поиск — жду цену"}},
         }
         
