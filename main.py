@@ -240,16 +240,16 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
     
     client_bill_dram = int(final_dram)
     
-    # === СООБЩЕНИЕ КЛИЕНТУ ===
+    # === СООБЩЕНИЕ КЛИЕНТУ (ПЕРВОЕ) ===
     client_msg = f"{order_code}\n\n"
     
-    lines_yuan = []
     for i in items:
         line_total = i['price'] * i['qty'] + i['delivery']
-        lines_yuan.append(line_total)
         client_msg += f"• {i['name']}:\n{fmt(i['price'])}x{int(i['qty'])}+{fmt(i['delivery'])} = {fmt(line_total)} CNY\n\n"
     
-    if len(lines_yuan) > 1:
+    # Формула расчета
+    if len(items) > 1:
+        lines_yuan = [i['price'] * i['qty'] + i['delivery'] for i in items]
         formula = "+".join([fmt(l) for l in lines_yuan])
         formula += f"={fmt(total_yuan)}"
     else:
@@ -260,7 +260,7 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
         formula += f"+{commission_pct}%={fmt(with_commission_yuan)}x{int(client_rate)}={int(final_dram)}AMD"
     elif fixed_amount > 0:
         base_dram = int(total_yuan * client_rate)
-        formula += f"x{int(client_rate)}={base_dram}+{fixed_amount}={int(final_dram)}"
+        formula += f"x{int(client_rate)}={base_dram}+{fixed_amount}={int(final_dram)}AMD"
     else:
         formula += f"x{int(client_rate)}={int(final_dram)}AMD"
     
@@ -271,7 +271,7 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
         with_commission_yuan = final_dram / client_rate
         client_msg += f"С комиссией ({commission_text}): {fmt(with_commission_yuan)} CNY\n"
     elif fixed_amount > 0:
-        client_msg += f"Фиксированная комиссия: {fixed_amount} AMD\n"
+        client_msg += f"Фикс комиссия: {fixed_amount} AMD\n"
     
     client_msg += f"К ОПЛАТЕ: {int(final_dram)} AMD"
     
@@ -281,44 +281,12 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
     else:
         await update.message.reply_text(client_msg)
     
-    # === СООБЩЕНИЕ МНЕ ===
-    my_msg = f"{order_code}\n\n"
+    # === СООБЩЕНИЕ МНЕ (ВТОРОЕ) ===
+    my_msg = f"МОЙ РАСЧЁТ:\n"
+    my_msg += f"{order_code}\n\n"
     my_msg += f"На закупку(CNY): {fmt(total_purchase_yuan)}\n"
     my_msg += f"На закупку(AMD): {on_purchase_dram} AMD\n"
-    my_msg += f"Инвойс: {'Да' if invoice else 'Нет'}\n\n"
-    
-    if fixed_amount > 0:
-        my_msg += f"Фикс комиссия:\n\n"
-    
-    my_msg += f"{order_code}\n\n"
-    
-    for i in items:
-        line_total = i['price'] * i['qty'] + i['delivery']
-        my_msg += f"• {i['name']}:\n{fmt(i['price'])}x{int(i['qty'])}+{fmt(i['delivery'])} = {fmt(line_total)} CNY\n\n"
-    
-    if len(lines_yuan) > 1:
-        formula = "+".join([fmt(l) for l in lines_yuan])
-        formula += f"={fmt(total_yuan)}"
-    else:
-        formula = fmt(total_yuan)
-    
-    if commission_pct > 0:
-        with_commission_yuan = final_dram / client_rate
-        formula += f"+{commission_pct}%={fmt(with_commission_yuan)}x{int(client_rate)}={int(final_dram)}AMD"
-    elif fixed_amount > 0:
-        base_dram = int(total_yuan * client_rate)
-        formula += f"x{int(client_rate)}={base_dram}+{fixed_amount}={int(final_dram)}"
-    
-    my_msg += f"{formula}\n"
-    my_msg += f"━━━━━━━━━━━━\n\n"
-    
-    if commission_pct > 0:
-        with_commission_yuan = final_dram / client_rate
-        my_msg += f"С комиссией ({commission_text}): {fmt(with_commission_yuan)} CNY\n"
-    elif fixed_amount > 0:
-        my_msg += f"Фиксированная комиссия: {fixed_amount} AMD\n"
-    
-    my_msg += f"К ОПЛАТЕ: {int(final_dram)} AMD"
+    my_msg += f"Инвойс: {'Да' if invoice else 'Нет'}"
     
     if hasattr(update, 'callback_query'):
         chat_id = update.callback_query.message.chat_id
