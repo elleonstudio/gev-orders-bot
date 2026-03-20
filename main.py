@@ -5,292 +5,345 @@ from notion_client import Client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Настройка
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
+# Получаем токены из переменных окружения Railway
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 NOTION_TOKEN = os.getenv('NOTION_TOKEN')
 NOTION_DATABASE_ID = os.getenv('NOTION_DATABASE_ID')
 
 notion = Client(auth=NOTION_TOKEN)
 
-CLIENT_NAME, PRODUCT_NAME, QUANTITY, CLIENT_PRICE, DELIVERY_PRICE, PURCHASE_PRICE, PHOTO, MORE_PRODUCTS, CLIENT_RATE, REAL_RATE = range(10)
+# Состояния диалога
+INVOICE, PRODUCT_NAME, QUANTITY, PRICE, DELIVERY, PURCHASE, PHOTO, MORE, CLIENT_RATE, REAL_RATE, PERCENT = range(11)
 
-orders_data = {}
+# Хранилище заказов (в памяти)
+orders = {}
 
-def generate_order_code(client_name):
-    today = datetime.now()
-    date_str = today.strftime("%d%m%y")
-    return f"{client_name.upper()}-{date_str}-1"
+def get_code(name):
+    return f"{name.upper()}-{datetime.now().strftime('%d%m%y')}-1"
+
+# === КОМАНДЫ ===
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        'Привет! Я бот для учёта заказов.\n\n'
-        'Команды:\n'
-        '/zakaz [имя клиента] - создать новый заказ\n'
-        '/nayti [запрос] - найти заказы\n'
+        '👋 Привет! Бот для заказов.\n\n'
+        '📋 Команды:\n'
+        '/zakaz [имя] — новый заказ\n'
+        '/nayti [текст] — найти заказ\n'
+        '/cancel — отменить'
     )
 
-async def start_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message_text = update.message.text
-    parts = message_text.split(maxsplit=1)
+async def zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    parts = text.split(maxsplit=1)
     
     if len(parts) < 2:
-        await update.message.reply_text('Укажи имя клиента: /zakaz Петя')
+        await update.message.reply_text('❌ Укажи имя: /zakaz Армен')
         return ConversationHandler.END
     
-    client_name = parts[1].strip()
-    user_id = update.effective_user.id
+    name = parts[1].strip()
+    uid = update.effective_user.id
     
-    orders_data[user_id] = {
-        'client': client_name,
-        'products': [],
-        'current_product': {}
+    orders[uid] = {
+        'client': name,
+        'items': [],
+        'current': {},
+        'invoice': False
     }
     
-    await update.message.reply_text(f'Создаём заказ для {client_name}.\n\nВведи название товара (подробно):')
-    return PRODUCT_NAME
+    # Спрашиваем инвойс
+    keyboard = [[InlineKeyboardButton("Да", callback_data='inv_yes'), 
+                 InlineKeyboardButton("Нет", callback_data='inv_no')]]
+    await update.message.reply_text(f'📦 Заказ для: {name}\n\nИнвойс?', reply_markup=InlineKeyboardMarkup(keyboard))
+    return INVOICE
 
-async def get_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    orders_data[user_id]['current_product']['name'] = update.message.text
-    await update.message.reply_text('Количество:')
-    return QUANTITY
-
-async def get_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    try:
-        quantity = int(update.message.text)
-        if quantity <= 0:
-            await update.message.reply_text('Введи число больше 0:')
-            return QUANTITY
-        orders_data[user_id]['current_product']['quantity'] = quantity
-        await update.message.reply_text('Цена за 1 шт. клиенту (¥):')
-        return CLIENT_PRICE
-    except ValueError:
-        await update.message.reply_text('Введи целое число:')
-        return QUANTITY
-
-async def get_client_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    try:
-        price_per_unit = float(update.message.text)
-        quantity = orders_data[user_id]['current_product'].get('quantity', 1)
-        total_price = price_per_unit * quantity
-        orders_data[user_id]['current_product']['client_price'] = total_price
-        orders_data[user_id]['current_product']['price_per_unit'] = price_per_unit
-        await update.message.reply_text(f'Цена за {quantity} шт: {total_price}¥\n\nДоставка (¥):')
-        return DELIVERY_PRICE
-    except ValueError:
-        await update.message.reply_text('Введи число:')
-        return CLIENT_PRICE
-
-async def get_delivery_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    try:
-        price = float(update.message.text)
-        orders_data[user_id]['current_product']['delivery'] = price
-        await update.message.reply_text('Закупка реальная (¥):')
-        return PURCHASE_PRICE
-    except ValueError:
-        await update.message.reply_text('Введи число:')
-        return DELIVERY_PRICE
-
-async def get_purchase_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    try:
-        price = float(update.message.text)
-        orders_data[user_id]['current_product']['purchase'] = price
-        await update.message.reply_text('Пришли фото товара (или напиши "нет"):')
-        return PHOTO
-    except ValueError:
-        await update.message.reply_text('Введи число:')
-        return PURCHASE_PRICE
-
-async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if update.message.photo:
-        photo_file_id = update.message.photo[-1].file_id
-        orders_data[user_id]['current_product']['photo'] = photo_file_id
-        keyboard = [
-            [InlineKeyboardButton("Да", callback_data='yes')],
-            [InlineKeyboardButton("Нет", callback_data='no')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text('Ещё товар?', reply_markup=reply_markup)
-        return MORE_PRODUCTS
-    elif update.message.text and update.message.text.lower() == 'нет':
-        orders_data[user_id]['current_product']['photo'] = None
-        keyboard = [
-            [InlineKeyboardButton("Да", callback_data='yes')],
-            [InlineKeyboardButton("Нет", callback_data='no')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text('Ещё товар?', reply_markup=reply_markup)
-        return MORE_PRODUCTS
-    else:
-        await update.message.reply_text('Пришли фото или напиши "нет":')
-        return PHOTO
-
-async def more_products_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def invoice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = update.effective_user.id
-    orders_data[user_id]['products'].append(orders_data[user_id]['current_product'])
+    uid = update.effective_user.id
     
-    if query.data == 'yes':
-        orders_data[user_id]['current_product'] = {}
-        await query.edit_message_text('Введи название товара (подробно):')
+    orders[uid]['invoice'] = (query.data == 'inv_yes')
+    await query.edit_message_text('📝 Название товара:')
+    return PRODUCT_NAME
+
+async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    orders[uid]['current']['name'] = update.message.text
+    await update.message.reply_text('🔢 Количество:')
+    return QUANTITY
+
+async def get_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    try:
+        orders[uid]['current']['qty'] = int(update.message.text)
+        await update.message.reply_text('💰 Цена за 1 шт (¥):')
+        return PRICE
+    except:
+        await update.message.reply_text('❌ Число! Количество:')
+        return QUANTITY
+
+async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    try:
+        orders[uid]['current']['price'] = float(update.message.text)
+        await update.message.reply_text('🚚 Доставка (¥):')
+        return DELIVERY
+    except:
+        await update.message.reply_text('❌ Число! Цена:')
+        return PRICE
+
+async def get_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    try:
+        orders[uid]['current']['delivery'] = float(update.message.text)
+        await update.message.reply_text('🏭 Закупка за 1 шт (¥):')
+        return PURCHASE
+    except:
+        await update.message.reply_text('❌ Число! Доставка:')
+        return DELIVERY
+
+async def get_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    try:
+        orders[uid]['current']['purchase'] = float(update.message.text)
+        await update.message.reply_text('📷 Пришли фото:')
+        return PHOTO
+    except:
+        await update.message.reply_text('❌ Число! Закупка:')
+        return PURCHASE
+
+async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    
+    if update.message.photo:
+        orders[uid]['current']['photo'] = update.message.photo[-1].file_id
+        
+        keyboard = [[InlineKeyboardButton("✅ Да", callback_data='more_yes'), 
+                     InlineKeyboardButton("❌ Нет", callback_data='more_no')]]
+        await update.message.reply_text('Ещё товар?', reply_markup=InlineKeyboardMarkup(keyboard))
+        return MORE
+    else:
+        await update.message.reply_text('📷 Нужно фото!')
+        return PHOTO
+
+async def more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = update.effective_user.id
+    
+    # Сохраняем товар
+    orders[uid]['items'].append(orders[uid]['current'])
+    
+    if query.data == 'more_yes':
+        orders[uid]['current'] = {}
+        await query.edit_message_text('📝 Название товара:')
         return PRODUCT_NAME
     else:
-        await query.edit_message_text('Курс клиенту? (например: 58)')
+        await query.edit_message_text('💱 Курс клиенту (например 58):')
         return CLIENT_RATE
 
 async def get_client_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    uid = update.effective_user.id
     try:
-        rate = float(update.message.text)
-        orders_data[user_id]['client_rate'] = rate
-        await update.message.reply_text('Курс реальный? (например: 55)')
+        orders[uid]['client_rate'] = float(update.message.text)
+        await update.message.reply_text('💱 Курс реальный (например 55):')
         return REAL_RATE
-    except ValueError:
-        await update.message.reply_text('Введи число:')
+    except:
+        await update.message.reply_text('❌ Число! Курс:')
         return CLIENT_RATE
 
 async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    uid = update.effective_user.id
     try:
-        rate = float(update.message.text)
-        orders_data[user_id]['real_rate'] = rate
-        order_code = generate_order_code(orders_data[user_id]['client'])
-        orders_data[user_id]['order_code'] = order_code
+        orders[uid]['real_rate'] = float(update.message.text)
         
-        # Считаем итоговые суммы
-        total_qty = 0
-        total_client = 0
-        total_purchase = 0
-        products_text = []
+        # Расчёты
+        items = orders[uid]['items']
+        client_rate = orders[uid]['client_rate']
         
-        for i, prod in enumerate(orders_data[user_id]['products'], 1):
-            qty = prod.get('quantity', 1)
-            total_qty += qty
-            total_client += prod['client_price'] + prod['delivery']
-            total_purchase += prod['purchase']
-            products_text.append(f"{i}. {prod['name']} (×{qty})")
+        # Считаем итог в юанях
+        total_yuan = sum(i['price'] * i['qty'] + i['delivery'] for i in items)
+        total_dram = total_yuan * client_rate
         
-        # Считаем маржу
-        margin = total_client - total_purchase
-        
-        try:
-            notion.pages.create(
-                parent={"database_id": NOTION_DATABASE_ID},
-                properties={
-                    "Клиент": {"select": {"name": orders_data[user_id]['client']}},
-                    "Описание товара": {"rich_text": [{"text": {"content": "; ".join(products_text)}}]},
-                    "Количество": {"number": total_qty},
-                    "Цена клиенту (¥)": {"number": int(prod['price_per_unit'])},
-                    "Цена закупки (¥)": {"number": int(prod['purchase'] / qty)},
-                    "Закупка реальная (֏)": {"number": total_purchase},
-                    "Счёт клиенту (֏)": {"number": total_client},
-                    "Курс клиенту": {"number": orders_data[user_id]['client_rate']},
-                    "Курс реальный": {"number": rate},
-                    "Маржа (֏)": {"number": margin},
-                    "Статус": {"select": {"name": "Поиск — жду цену"}},
-                }
-            )
+        # Проверяем комиссию
+        if total_dram < 10000:
+            # Фикс 10000
+            final_dram = 10000
+            commission = 0
+            await show_result(update, context, total_yuan, final_dram, "Фикс 10000", commission)
+            return ConversationHandler.END
+        else:
+            # Спросить процент
+            keyboard = [[InlineKeyboardButton("+3%", callback_data='pct_3'), 
+                         InlineKeyboardButton("+5%", callback_data='pct_5')]]
+            msg = f"📊 Итого: {total_yuan} ¥ = {int(total_dram)} ֏\n\nВыбери комиссию:"
+            await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+            return PERCENT
             
-            summary = f"""✅ Заказ создан!
-
-Клиент: {orders_data[user_id]['client']}
-Товаров: {len(orders_data[user_id]['products'])}
-Общее кол-во: {total_qty} шт
-Счёт клиенту: {total_client}֏
-Закупка: {total_purchase}¥
-Маржа: {margin}֏
-
-Сохранено в Notion!"""
-            await update.message.reply_text(summary)
-            
-        except Exception as e:
-            logging.error(f"Notion error: {e}")
-            await update.message.reply_text(f'Ошибка сохранения в Notion: {e}')
-        
-        del orders_data[user_id]
-        return ConversationHandler.END
-        
-    except ValueError:
-        await update.message.reply_text('Введи число:')
+    except:
+        await update.message.reply_text('❌ Число! Курс:')
         return REAL_RATE
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id in orders_data:
-        del orders_data[user_id]
-    await update.message.reply_text('Заказ отменён.')
+async def percent_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = update.effective_user.id
+    
+    pct = 3 if query.data == 'pct_3' else 5
+    orders[uid]['commission'] = pct
+    
+    # Пересчёт
+    items = orders[uid]['items']
+    client_rate = orders[uid]['client_rate']
+    total_yuan = sum(i['price'] * i['qty'] + i['delivery'] for i in items)
+    base_dram = total_yuan * client_rate
+    final_dram = int(base_dram * (1 + pct / 100))
+    
+    await show_result(update, context, total_yuan, final_dram, f"+{pct}%", pct)
     return ConversationHandler.END
 
-async def search_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.replace('/nayti', '').replace('/find', '').strip()
-    if not query:
-        await update.message.reply_text('Укажи что искать: /nayti nike')
-        return
+async def show_result(update, context, total_yuan, final_dram, commission_text, commission_pct):
+    uid = update.effective_user.id
+    items = orders[uid]['items']
+    client = orders[uid]['client']
+    client_rate = orders[uid]['client_rate']
+    real_rate = orders[uid]['real_rate']
+    invoice = orders[uid]['invoice']
+    
+    # Расчёт для меня
+    total_purchase_yuan = sum(i['purchase'] * i['qty'] for i in items)
+    on_purchase_dram = int(total_purchase_yuan * real_rate)
+    margin_dram = final_dram - on_purchase_dram
+    profit_dram = int(margin_dram * 0.9) if invoice else margin_dram
+    
+    # Сообщение КЛИЕНТУ
+    client_msg = "📋 ВАШ ЗАКАЗ:\n\n"
+    for i in items:
+        line_total = i['price'] * i['qty'] + i['delivery']
+        client_msg += f"• {i['name']}:\n{i['price']}×{i['qty']}+{i['delivery']} = {line_total} ¥\n\n"
+    
+    client_msg += f"━━━━━━━━━━━━\n\n"
+    client_msg += f"💰 ИТОГО (¥): {total_yuan}\n"
+    if commission_pct > 0:
+        client_msg += f"📈 С комиссией ({commission_text}): {int(final_dram / client_rate)} ¥\n"
+    client_msg += f"💳 К ОПЛАТЕ: {final_dram} ֏"
+    
+    # Сообщение МНЕ
+    my_msg = f"\n\n💼 МОЙ РАСЧЁТ:\n"
+    my_msg += f"На закупку: {on_purchase_dram} ֏\n"
+    my_msg += f"Счёт клиенту: {final_dram} ֏\n"
+    my_msg += f"Маржа: {margin_dram} ֏\n"
+    my_msg += f"Инвойс: {'Да' if invoice else 'Нет'}\n"
+    my_msg += f"💵 Прибыль: {profit_dram} ֏"
+    
+    # Отправляем
+    if hasattr(update, 'callback_query'):
+        await update.callback_query.edit_message_text(client_msg + my_msg)
+    else:
+        await update.message.reply_text(client_msg + my_msg)
+    
+    # Сохраняем в Notion
     try:
-        response = notion.databases.query(
-            database_id=NOTION_DATABASE_ID,
-            filter={
-                "or": [
-                    {"property": "Описание товара", "rich_text": {"contains": query}},
-                    {"property": "Клиент", "select": {"equals": query}}
-                ]
+        notion.pages.create(
+            parent={"database_id": NOTION_DATABASE_ID},
+            properties={
+                "Название товара": {"title": [{"text": {"content": "; ".join([i['name'] for i in items])}}]},
+                "Количество": {"number": sum(i['qty'] for i in items)},
+                "Цена клиенту (¥)": {"number": int(items[0]['price'])},
+                "Цена закупки (¥)": {"number": int(items[0]['purchase'])},
+                "Доставка (¥)": {"number": sum(i['delivery'] for i in items)},
+                "ИТОГО (¥)": {"number": total_yuan},
+                "Комиссия %": {"number": commission_pct},
+                "С комиссией (¥)": {"number": int(final_dram / client_rate)},
+                "К ОПЛАТЕ (֏)": {"number": final_dram},
+                "Курс клиенту": {"number": client_rate},
+                "Курс реальный": {"number": real_rate},
+                "На закупку (֏)": {"number": on_purchase_dram},
+                "Маржа (֏)": {"number": margin_dram},
+                "Инвойс": {"select": {"name": "Да" if invoice else "Нет"}},
+                "Прибыль (֏)": {"number": profit_dram},
             }
         )
-        results = response.get('results', [])
-        if not results:
-            await update.message.reply_text(f'Ничего не найдено по запросу: {query}')
-            return
-        text = f'Найдено {len(results)} заказов:\n\n'
-        for page in results[:5]:
-            props = page['properties']
-            desc = props['Описание товара']['rich_text'][0]['text']['content'] if props['Описание товара']['rich_text'] else 'Без описания'
-            client = props['Клиент']['select']['name'] if props['Клиент']['select'] else 'Неизвестно'
-            status = props['Статус']['select']['name'] if props['Статус']['select'] else '—'
-            text += f'{desc}\nКлиент: {client}\nСтатус: {status}\n\n'
-        await update.message.reply_text(text)
     except Exception as e:
-        logging.error(f"Search error: {e}")
-        await update.message.reply_text(f'Ошибка поиска: {e}')
+        logging.error(f"Notion error: {e}")
+        if hasattr(update, 'callback_query'):
+            await update.callback_query.message.reply_text(f"⚠️ Notion: {e}")
+        else:
+            await update.message.reply_text(f"⚠️ Notion: {e}")
+    
+    # Чистим
+    del orders[uid]
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid in orders:
+        del orders[uid]
+    await update.message.reply_text('❌ Отменено')
+    return ConversationHandler.END
+
+async def nayti(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.message.text.replace('/nayti', '').strip()
+    if not q:
+        await update.message.reply_text('🔍 /nayти текст')
+        return
+    
+    try:
+        res = notion.databases.query(
+            database_id=NOTION_DATABASE_ID,
+            filter={"or": [
+                {"property": "Название товара", "title": {"contains": q}},
+                {"property": "Клиент", "select": {"equals": q}}
+            ]}
+        )
+        
+        results = res.get('results', [])
+        if not results:
+            await update.message.reply_text('Ничего не найдено')
+            return
+        
+        msg = f"🔍 Найдено: {len(results)}\n\n"
+        for r in results[:5]:
+            p = r['properties']
+            name = p['Название товара']['title'][0]['text']['content'] if p['Название товара']['title'] else '-'
+            client = p.get('Клиент', {}).get('select', {}).get('name', '-')
+            msg += f"{name}\nКлиент: {client}\n\n"
+        
+        await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+
+# === ЗАПУСК ===
 
 def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # Простые команды для теста
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('test', lambda u, c: u.message.reply_text('Тест работает!')))
+    # Обработчики
+    app.add_handler(CommandHandler('start', start))
     
-    # ConversationHandler для заказов
-    order_conv = ConversationHandler(
-        entry_points=[CommandHandler('zakaz', start_order)],
+    conv = ConversationHandler(
+        entry_points=[CommandHandler('zakaz', zakaz)],
         states={
-            PRODUCT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_product_name)],
-            QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_quantity)],
-            CLIENT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_price)],
-            DELIVERY_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_delivery_price)],
-            PURCHASE_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_purchase_price)],
-            PHOTO: [MessageHandler(filters.PHOTO | filters.TEXT & ~filters.COMMAND, get_photo)],
-            MORE_PRODUCTS: [CallbackQueryHandler(more_products_callback)],
+            INVOICE: [CallbackQueryHandler(invoice_cb, pattern='^inv_')],
+            PRODUCT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
+            QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_qty)],
+            PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_price)],
+            DELIVERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_delivery)],
+            PURCHASE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_purchase)],
+            PHOTO: [MessageHandler(filters.PHOTO, get_photo)],
+            MORE: [CallbackQueryHandler(more_cb, pattern='^more_')],
             CLIENT_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_rate)],
             REAL_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_real_rate)],
+            PERCENT: [CallbackQueryHandler(percent_cb, pattern='^pct_')],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
     
-    application.add_handler(order_conv)
-    application.add_handler(CommandHandler(['nayti', 'find'], search_orders))
+    app.add_handler(conv)
+    app.add_handler(CommandHandler(['nayti', 'find'], nayti))
     
-    application.run_polling()
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
