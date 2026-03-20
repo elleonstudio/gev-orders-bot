@@ -16,7 +16,7 @@ NOTION_DATABASE_ID = os.getenv('NOTION_DATABASE_ID')
 notion = Client(auth=NOTION_TOKEN)
 
 # Состояния диалога
-INVOICE, PRODUCT_NAME, QUANTITY, PRICE, DELIVERY, PURCHASE, PHOTO, MORE, CLIENT_RATE, REAL_RATE, PERCENT = range(11)
+INVOICE, PRODUCT_NAME, QUANTITY, PRICE, DELIVERY, PURCHASE, MORE, CLIENT_RATE, REAL_RATE, PERCENT, FIXED_COMMISSION = range(11)
 
 # Хранилище заказов (в памяти)
 orders = {}
@@ -38,21 +38,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     parts = text.split(maxsplit=1)
-    
+
     if len(parts) < 2:
         await update.message.reply_text('❌ Укажи имя: /zakaz Армен')
         return ConversationHandler.END
-    
+
     name = parts[1].strip()
     uid = update.effective_user.id
-    
+
     orders[uid] = {
         'client': name,
         'items': [],
         'current': {},
         'invoice': False
     }
-    
+
     # Спрашиваем инвойс
     keyboard = [[InlineKeyboardButton("Да", callback_data='inv_yes'), 
                  InlineKeyboardButton("Нет", callback_data='inv_no')]]
@@ -63,7 +63,7 @@ async def invoice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = update.effective_user.id
-    
+
     orders[uid]['invoice'] = (query.data == 'inv_yes')
     await query.edit_message_text('📝 Название товара:')
     return PRODUCT_NAME
@@ -108,34 +108,24 @@ async def get_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['current']['purchase'] = float(update.message.text)
-        await update.message.reply_text('📷 Пришли фото:')
-        return PHOTO
-    except:
-        await update.message.reply_text('❌ Число! Закупка:')
-        return PURCHASE
 
-async def get_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    
-    if update.message.photo:
-        orders[uid]['current']['photo'] = update.message.photo[-1].file_id
-        
+        # Сразу спрашиваем "Ещё товар?" без фото
         keyboard = [[InlineKeyboardButton("✅ Да", callback_data='more_yes'), 
                      InlineKeyboardButton("❌ Нет", callback_data='more_no')]]
         await update.message.reply_text('Ещё товар?', reply_markup=InlineKeyboardMarkup(keyboard))
         return MORE
-    else:
-        await update.message.reply_text('📷 Нужно фото!')
-        return PHOTO
+    except:
+        await update.message.reply_text('❌ Число! Закупка:')
+        return PURCHASE
 
 async def more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = update.effective_user.id
-    
+
     # Сохраняем товар
     orders[uid]['items'].append(orders[uid]['current'])
-    
+
     if query.data == 'more_yes':
         orders[uid]['current'] = {}
         await query.edit_message_text('📝 Название товара:')
@@ -158,22 +148,25 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['real_rate'] = float(update.message.text)
-        
+
         # Расчёты
         items = orders[uid]['items']
         client_rate = orders[uid]['client_rate']
-        
+
         # Считаем итог в юанях
         total_yuan = sum(i['price'] * i['qty'] + i['delivery'] for i in items)
         total_dram = total_yuan * client_rate
-        
+
         # Проверяем комиссию
         if total_dram < 10000:
-            # Фикс 10000
-            final_dram = 10000
-            commission = 0
-            await show_result(update, context, total_yuan, final_dram, "Фикс 10000", commission)
-            return ConversationHandler.END
+            # Спросить фиксированную сумму: 10000 или 15000
+            keyboard = [
+                [InlineKeyboardButton("10000 ֏", callback_data='fix_10000')], 
+                [InlineKeyboardButton("15000 ֏", callback_data='fix_15000')]
+            ]
+            msg = f"📊 Итого: {total_yuan} ¥ = {int(total_dram)} ֏\n\nВыбери фиксированную комиссию:"
+            await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+            return FIXED_COMMISSION
         else:
             # Спросить процент
             keyboard = [[InlineKeyboardButton("+3%", callback_data='pct_3'), 
@@ -181,98 +174,184 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = f"📊 Итого: {total_yuan} ¥ = {int(total_dram)} ֏\n\nВыбери комиссию:"
             await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
             return PERCENT
-            
+
     except:
         await update.message.reply_text('❌ Число! Курс:')
         return REAL_RATE
+
+async def fixed_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = update.effective_user.id
+
+    fixed_amount = 10000 if query.data == 'fix_10000' else 15000
+    orders[uid]['fixed_commission'] = fixed_amount
+    orders[uid]['commission'] = 0  # Нет процентной комиссии
+
+    # Пересчёт
+    items = orders[uid]['items']
+    client_rate = orders[uid]['client_rate']
+    total_yuan = sum(i['price'] * i['qty'] + i['delivery'] for i in items)
+    final_dram = fixed_amount
+
+    await show_result(update, context, total_yuan, final_dram, f"Фикс {fixed_amount}", 0, fixed_amount)
+    return ConversationHandler.END
 
 async def percent_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = update.effective_user.id
-    
+
     pct = 3 if query.data == 'pct_3' else 5
     orders[uid]['commission'] = pct
-    
+    orders[uid]['fixed_commission'] = 0
+
     # Пересчёт
     items = orders[uid]['items']
     client_rate = orders[uid]['client_rate']
     total_yuan = sum(i['price'] * i['qty'] + i['delivery'] for i in items)
     base_dram = total_yuan * client_rate
     final_dram = int(base_dram * (1 + pct / 100))
-    
-    await show_result(update, context, total_yuan, final_dram, f"+{pct}%", pct)
+
+    await show_result(update, context, total_yuan, final_dram, f"+{pct}%", pct, 0)
     return ConversationHandler.END
 
-async def show_result(update, context, total_yuan, final_dram, commission_text, commission_pct):
+async def show_result(update, context, total_yuan, final_dram, commission_text, commission_pct, fixed_amount):
     uid = update.effective_user.id
     items = orders[uid]['items']
     client = orders[uid]['client']
     client_rate = orders[uid]['client_rate']
     real_rate = orders[uid]['real_rate']
     invoice = orders[uid]['invoice']
-    
-    # Расчёт для меня
-    total_purchase_yuan = sum(i['purchase'] * i['qty'] for i in items)
+
+    # Генерируем код заказа
+    order_code = get_code(client)
+
+    # === РАСЧЁТ ДЛЯ МЕНЯ ===
+    # На закупку (¥) = закупочная цена × количество + доставка
+    total_purchase_yuan = sum(i['purchase'] * i['qty'] + i['delivery'] for i in items)
+    total_qty = sum(i['qty'] for i in items)
     on_purchase_dram = int(total_purchase_yuan * real_rate)
     margin_dram = final_dram - on_purchase_dram
     profit_dram = int(margin_dram * 0.9) if invoice else margin_dram
-    
-    # Сообщение КЛИЕНТУ
-    client_msg = "📋 ВАШ ЗАКАЗ:\n\n"
+
+    # Счёт клиенту в драмах (то же что final_dram)
+    client_bill_dram = int(final_dram)
+
+    # === СООБЩЕНИЕ КЛИЕНТУ (ПЕРВОЕ СООБЩЕНИЕ) ===
+    client_msg = f"{order_code}\n"
+    client_msg += "📋 ВАШ ЗАКАЗ:\n\n"
+
+    lines_yuan = []
     for i in items:
         line_total = i['price'] * i['qty'] + i['delivery']
+        lines_yuan.append(line_total)
         client_msg += f"• {i['name']}:\n{i['price']}×{i['qty']}+{i['delivery']} = {line_total} ¥\n\n"
-    
+
+    # Формула расчёта
+    if len(lines_yuan) > 1:
+        formula = "+".join([str(int(l)) for l in lines_yuan])
+        formula += f"={int(total_yuan)}"
+    else:
+        formula = str(int(total_yuan))
+
+    if commission_pct > 0:
+        with_commission_yuan = int(final_dram / client_rate)
+        formula += f"+{commission_pct}%={with_commission_yuan}x{int(client_rate)}={int(final_dram)}֏"
+    elif fixed_amount > 0:
+        formula += f"x{int(client_rate)}={int(total_yuan * client_rate)} (фикс {fixed_amount})"
+    else:
+        formula += f"x{int(client_rate)}={int(final_dram)}֏"
+
+    client_msg += f"{formula}\n"
     client_msg += f"━━━━━━━━━━━━\n\n"
     client_msg += f"💰 ИТОГО (¥): {total_yuan}\n"
+
     if commission_pct > 0:
-        client_msg += f"📈 С комиссией ({commission_text}): {int(final_dram / client_rate)} ¥\n"
-    client_msg += f"💳 К ОПЛАТЕ: {final_dram} ֏"
-    
-    # Сообщение МНЕ
-    my_msg = f"\n\n💼 МОЙ РАСЧЁТ:\n"
-    my_msg += f"На закупку: {on_purchase_dram} ֏\n"
-    my_msg += f"Счёт клиенту: {final_dram} ֏\n"
+        with_commission_yuan = int(final_dram / client_rate)
+        client_msg += f"📈 С комиссией ({commission_text}): {with_commission_yuan} ¥\n"
+    elif fixed_amount > 0:
+        client_msg += f"📈 Фиксированная комиссия: {fixed_amount} ֏\n"
+
+    client_msg += f"💳 К ОПЛАТЕ: {int(final_dram)} ֏"
+
+    # Отправляем КЛИЕНТУ (первое сообщение)
+    if hasattr(update, 'callback_query'):
+        chat_id = update.callback_query.message.chat_id
+        await context.bot.send_message(chat_id=chat_id, text=client_msg)
+    else:
+        await update.message.reply_text(client_msg)
+
+    # === СООБЩЕНИЕ МНЕ (ВТОРОЕ СООБЩЕНИЕ) ===
+    my_msg = f"💼 МОЙ РАСЧЁТ:\n"
+    my_msg += f"{order_code}\n\n"
+    my_msg += f"На закупку(¥): {int(total_purchase_yuan)}\n"
+    my_msg += f"На закупку(֏): {on_purchase_dram} ֏\n"
     my_msg += f"Маржа: {margin_dram} ֏\n"
     my_msg += f"Инвойс: {'Да' if invoice else 'Нет'}\n"
     my_msg += f"💵 Прибыль: {profit_dram} ֏"
-    
-    # Отправляем
+
+    # Отправляем МНЕ (второе сообщение)
     if hasattr(update, 'callback_query'):
-        await update.callback_query.edit_message_text(client_msg + my_msg)
+        chat_id = update.callback_query.message.chat_id
+        await context.bot.send_message(chat_id=chat_id, text=my_msg)
     else:
-        await update.message.reply_text(client_msg + my_msg)
-    
-    # Сохраняем в Notion
+        await update.message.reply_text(my_msg)
+
+    # === СОХРАНЕНИЕ В NOTION ===
     try:
+        # Формируем описание товара для поля Title
+        items_description = "; ".join([f"{i['name']} (×{i['qty']})" for i in items])
+
+        notion_properties = {
+            "Описание товара": {"title": [{"text": {"content": items_description}}]},
+            "Количество": {"number": int(total_qty)},
+            "Цена клиенту (¥)": {"number": float(items[0]['price'])},
+            "Цена закупки (¥)": {"number": float(items[0]['purchase'])},
+            "Доставка (¥)": {"number": float(sum(i['delivery'] for i in items))},
+            "ИТОГО (¥)": {"number": float(total_yuan)},
+            "На закупку (¥)": {"number": float(total_purchase_yuan)},
+            "Комиссия %": {"number": float(commission_pct)},
+            "С комиссией (¥)": {"number": float(final_dram / client_rate) if client_rate > 0 else 0},
+            "К ОПЛАТЕ (֏)": {"number": int(final_dram)},
+            "Курс клиенту": {"number": float(client_rate)},
+            "Курс реальный": {"number": float(real_rate)},
+            "Закупка реальная (¥)": {"number": float(total_purchase_yuan)},
+            "На закупку (֏)": {"number": int(on_purchase_dram)},
+            "Маржа (֏)": {"number": int(margin_dram)},
+            "Инвойс": {"select": {"name": "Да" if invoice else "Нет"}},
+            "Прибыль (֏)": {"number": int(profit_dram)},
+            "Счёт клиенту (֏)": {"number": int(client_bill_dram)},
+            "Клиент": {"select": {"name": client}},
+            "Дата": {"date": {"start": datetime.now().isoformat()}},
+            "Статус": {"select": {"name": "Поиск — жду цену"}},
+        }
+
+        # Добавляем фиксированную комиссию если есть
+        if fixed_amount > 0:
+            notion_properties["Фиксированная комиссия (֏)"] = {"number": int(fixed_amount)}
+
         notion.pages.create(
             parent={"database_id": NOTION_DATABASE_ID},
-            properties={
-                "Название товара": {"title": [{"text": {"content": "; ".join([i['name'] for i in items])}}]},
-                "Количество": {"number": sum(i['qty'] for i in items)},
-                "Цена клиенту (¥)": {"number": int(items[0]['price'])},
-                "Цена закупки (¥)": {"number": int(items[0]['purchase'])},
-                "Доставка (¥)": {"number": sum(i['delivery'] for i in items)},
-                "ИТОГО (¥)": {"number": total_yuan},
-                "Комиссия %": {"number": commission_pct},
-                "С комиссией (¥)": {"number": int(final_dram / client_rate)},
-                "К ОПЛАТЕ (֏)": {"number": final_dram},
-                "Курс клиенту": {"number": client_rate},
-                "Курс реальный": {"number": real_rate},
-                "На закупку (֏)": {"number": on_purchase_dram},
-                "Маржа (֏)": {"number": margin_dram},
-                "Инвойс": {"select": {"name": "Да" if invoice else "Нет"}},
-                "Прибыль (֏)": {"number": profit_dram},
-            }
+            properties=notion_properties
         )
+
+        # Подтверждение сохранения
+        if hasattr(update, 'callback_query'):
+            chat_id = update.callback_query.message.chat_id
+            await context.bot.send_message(chat_id=chat_id, text="✅ Сохранено в Notion")
+        else:
+            await update.message.reply_text("✅ Сохранено в Notion")
+
     except Exception as e:
         logging.error(f"Notion error: {e}")
+        error_msg = f"⚠️ Ошибка Notion: {str(e)[:300]}"
         if hasattr(update, 'callback_query'):
-            await update.callback_query.message.reply_text(f"⚠️ Notion: {e}")
+            chat_id = update.callback_query.message.chat_id
+            await context.bot.send_message(chat_id=chat_id, text=error_msg)
         else:
-            await update.message.reply_text(f"⚠️ Notion: {e}")
-    
+            await update.message.reply_text(error_msg)
+
     # Чистим
     del orders[uid]
 
@@ -288,28 +367,28 @@ async def nayti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not q:
         await update.message.reply_text('🔍 /nayти текст')
         return
-    
+
     try:
         res = notion.databases.query(
             database_id=NOTION_DATABASE_ID,
             filter={"or": [
-                {"property": "Название товара", "title": {"contains": q}},
+                {"property": "Описание товара", "title": {"contains": q}},
                 {"property": "Клиент", "select": {"equals": q}}
             ]}
         )
-        
+
         results = res.get('results', [])
         if not results:
             await update.message.reply_text('Ничего не найдено')
             return
-        
+
         msg = f"🔍 Найдено: {len(results)}\n\n"
         for r in results[:5]:
             p = r['properties']
-            name = p['Название товара']['title'][0]['text']['content'] if p['Название товара']['title'] else '-'
+            name = p['Описание товара']['title'][0]['text']['content'] if p['Описание товара']['title'] else '-'
             client = p.get('Клиент', {}).get('select', {}).get('name', '-')
             msg += f"{name}\nКлиент: {client}\n\n"
-        
+
         await update.message.reply_text(msg)
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
@@ -318,10 +397,10 @@ async def nayti(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
+
     # Обработчики
     app.add_handler(CommandHandler('start', start))
-    
+
     conv = ConversationHandler(
         entry_points=[CommandHandler('zakaz', zakaz)],
         states={
@@ -331,18 +410,18 @@ def main():
             PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_price)],
             DELIVERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_delivery)],
             PURCHASE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_purchase)],
-            PHOTO: [MessageHandler(filters.PHOTO, get_photo)],
             MORE: [CallbackQueryHandler(more_cb, pattern='^more_')],
             CLIENT_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_rate)],
             REAL_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_real_rate)],
             PERCENT: [CallbackQueryHandler(percent_cb, pattern='^pct_')],
+            FIXED_COMMISSION: [CallbackQueryHandler(fixed_commission_cb, pattern='^fix_')],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
-    
+
     app.add_handler(conv)
     app.add_handler(CommandHandler(['nayti', 'find'], nayti))
-    
+
     app.run_polling()
 
 if __name__ == '__main__':
