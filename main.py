@@ -128,14 +128,17 @@ async def more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid = update.effective_user.id
     
+    # Сохраняем товар
     orders[uid]['items'].append(orders[uid]['current'])
     
     if query.data == 'more_yes':
         orders[uid]['current'] = {}
-        await query.edit_message_text('📝 Название товара:')
+        # ИСПРАВЛЕНО: используем message.reply_text вместо edit_message_text
+        await query.message.reply_text('📝 Название товара:')
         return PRODUCT_NAME
     else:
-        await update.message.reply_text('💱 Курс клиенту (например 58):')
+        # ИСПРАВЛЕНО: используем message.reply_text вместо edit_message_text
+        await query.message.reply_text('💱 Курс клиенту (например 58):')
         return CLIENT_RATE
 
 async def get_client_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
