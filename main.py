@@ -22,7 +22,8 @@ INVOICE, PRODUCT_NAME, QUANTITY, PRICE, DELIVERY, PURCHASE, MORE, CLIENT_RATE, R
 orders = {}
 
 def get_code(name):
-    return f"{name.upper()}-{datetime.now().strftime('%d%m%y')}-1"
+    """Формат: NAME-DDMMYY"""
+    return f"{name.upper()}-{datetime.now().strftime('%d%m%y')}"
 
 def fmt(n):
     """Формат числа: целые без .0, дробные с точностью"""
@@ -83,7 +84,7 @@ async def get_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['current']['qty'] = int(update.message.text)
-        await update.message.reply_text('💰 Цена за 1 шт (¥):')
+        await update.message.reply_text('💰 Цена клиенту за 1 шт (¥):')
         return PRICE
     except:
         await update.message.reply_text('❌ Число! Количество:')
@@ -103,7 +104,7 @@ async def get_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['current']['delivery'] = float(update.message.text)
-        await update.message.reply_text('🏭 Закупка за 1 шт (¥):')
+        await update.message.reply_text('🏭 Закупка у фабрики за 1 шт (¥):')
         return PURCHASE
     except:
         await update.message.reply_text('❌ Число! Доставка:')
@@ -155,21 +156,27 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         items = orders[uid]['items']
         client_rate = orders[uid]['client_rate']
         
+        # Считаем итог в юанях
         total_yuan = sum(i['price'] * i['qty'] + i['delivery'] for i in items)
-        total_dram = total_yuan * client_rate
         
-        if total_dram < 10000:
+        # Считаем комиссию 3% в драмах
+        commission_yuan = total_yuan * 0.03
+        commission_dram = commission_yuan * client_rate
+        
+        # Если комиссия меньше 10000 драм → фикс
+        if commission_dram < 10000:
             keyboard = [
                 [InlineKeyboardButton("10000 ֏", callback_data='fix_10000')], 
                 [InlineKeyboardButton("15000 ֏", callback_data='fix_15000')]
             ]
-            msg = f"📊 Итого: {fmt(total_yuan)} ¥ = {int(total_dram)} ֏\n\nВыбери фиксированную комиссию:"
+            msg = f"📊 Итого: {fmt(total_yuan)} ¥\nКомиссия 3% = {int(commission_dram)} ֏ (мало)\n\nВыбери фиксированную комиссию:"
             await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
             return FIXED_COMMISSION
         else:
+            # Комиссия большая → спрашиваем %
             keyboard = [[InlineKeyboardButton("+3%", callback_data='pct_3'), 
                          InlineKeyboardButton("+5%", callback_data='pct_5')]]
-            msg = f"📊 Итого: {fmt(total_yuan)} ¥ = {int(total_dram)} ֏\n\nВыбери комиссию:"
+            msg = f"📊 Итого: {fmt(total_yuan)} ¥\nКомиссия 3% = {int(commission_dram)} ֏\n\nВыбери комиссию:"
             await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
             return PERCENT
             
@@ -230,7 +237,7 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
     client_bill_dram = int(final_dram)
     
     # === СООБЩЕНИЕ КЛИЕНТУ ===
-    client_msg = f"📋 ВАШ ЗАКАЗ: {order_code}\n\n"
+    client_msg = f"{order_code}\n\n"
     
     lines_yuan = []
     for i in items:
@@ -309,7 +316,6 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
             "Прибыль (֏)": {"number": int(profit_dram)},
             "Счёт клиенту (֏)": {"number": int(client_bill_dram)},
             "Клиент": {"select": {"name": client}},
-            
             "Статус": {"select": {"name": "Поиск — жду цену"}},
         }
         
@@ -329,7 +335,7 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
             
     except Exception as e:
         logging.error(f"Notion error: {e}")
-        error_msg = f"⚠️ Ошибка Notion: {str(e)[:300]}"
+        error_msg = f"⚠️ Ошибка Notion: {str(e)[:400]}"
         if hasattr(update, 'callback_query'):
             chat_id = update.callback_query.message.chat_id
             await context.bot.send_message(chat_id=chat_id, text=error_msg)
