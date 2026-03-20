@@ -128,16 +128,13 @@ async def more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid = update.effective_user.id
     
-    # Сохраняем товар
     orders[uid]['items'].append(orders[uid]['current'])
     
     if query.data == 'more_yes':
         orders[uid]['current'] = {}
-        # ИСПРАВЛЕНО: используем message.reply_text вместо edit_message_text
         await query.message.reply_text('📝 Название товара:')
         return PRODUCT_NAME
     else:
-        # ИСПРАВЛЕНО: используем message.reply_text вместо edit_message_text
         await query.message.reply_text('💱 Курс клиенту (например 58):')
         return CLIENT_RATE
 
@@ -159,14 +156,11 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         items = orders[uid]['items']
         client_rate = orders[uid]['client_rate']
         
-        # Считаем итог в юанях
         total_yuan = sum(i['price'] * i['qty'] + i['delivery'] for i in items)
         
-        # Считаем комиссию 3% в драмах
         commission_yuan = total_yuan * 0.03
         commission_dram = commission_yuan * client_rate
         
-        # Если комиссия меньше 10000 драм → фикс
         if commission_dram < 10000:
             keyboard = [
                 [InlineKeyboardButton("10000 AMD", callback_data='fix_10000')], 
@@ -176,7 +170,6 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
             return FIXED_COMMISSION
         else:
-            # Комиссия большая → спрашиваем %
             keyboard = [[InlineKeyboardButton("+3%", callback_data='pct_3'), 
                          InlineKeyboardButton("+5%", callback_data='pct_5')]]
             msg = f"📊 Итого: {fmt(total_yuan)} CNY\nКомиссия 3% = {int(commission_dram)} AMD\n\nВыбери комиссию:"
@@ -199,7 +192,9 @@ async def fixed_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE
     items = orders[uid]['items']
     client_rate = orders[uid]['client_rate']
     total_yuan = sum(i['price'] * i['qty'] + i['delivery'] for i in items)
-    final_dram = fixed_amount
+    
+    base_dram = int(total_yuan * client_rate)
+    final_dram = base_dram + fixed_amount
     
     await show_result(update, context, total_yuan, final_dram, f"Фикс {fixed_amount}", 0, fixed_amount)
     return ConversationHandler.END
@@ -235,8 +230,14 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
     total_purchase_yuan = sum(i['purchase'] * i['qty'] + i['delivery'] for i in items)
     total_qty = sum(i['qty'] for i in items)
     on_purchase_dram = int(total_purchase_yuan * real_rate)
-    margin_dram = final_dram - on_purchase_dram
-    profit_dram = int(margin_dram * 0.9) if invoice else margin_dram
+    
+    if fixed_amount > 0:
+        margin_dram = fixed_amount
+        profit_dram = fixed_amount
+    else:
+        margin_dram = final_dram - on_purchase_dram
+        profit_dram = int(margin_dram * 0.9) if invoice else margin_dram
+    
     client_bill_dram = int(final_dram)
     
     # === СООБЩЕНИЕ КЛИЕНТУ ===
@@ -258,7 +259,8 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
         with_commission_yuan = final_dram / client_rate
         formula += f"+{commission_pct}%={fmt(with_commission_yuan)}x{int(client_rate)}={int(final_dram)}AMD"
     elif fixed_amount > 0:
-        formula += f"x{int(client_rate)}={int(total_yuan * client_rate)} (фикс {fixed_amount})"
+        base_dram = int(total_yuan * client_rate)
+        formula += f"x{int(client_rate)}={base_dram}+{fixed_amount}={int(final_dram)}"
     else:
         formula += f"x{int(client_rate)}={int(final_dram)}AMD"
     
@@ -307,7 +309,7 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
             "Доставка (CNY)": {"number": float(sum(i['delivery'] for i in items))},
             "ИТОГО (CNY)": {"number": float(total_yuan)},
             "На закупку (CNY)": {"number": float(total_purchase_yuan)},
-            "Комиссия %": {"number": float(commission_pct)},
+            "Комиссия": {"number": float(commission_pct)},
             "С комиссией (CNY)": {"number": float(final_dram / client_rate) if client_rate > 0 else 0},
             "К ОПЛАТЕ (AMD)": {"number": int(final_dram)},
             "Курс клиенту": {"number": float(client_rate)},
