@@ -26,10 +26,11 @@ def get_code(name):
     return f"{name.upper()}-{datetime.now().strftime('%d%m%y')}"
 
 def fmt(n):
-    """Формат числа: целые без .0, дробные с точностью"""
     if n == int(n):
         return str(int(n))
-    return str(n)
+    return f"{n:.1f}"
+
+
 
 # === КОМАНДЫ ===
 
