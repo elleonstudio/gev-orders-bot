@@ -26,11 +26,10 @@ def get_code(name):
     return f"{name.upper()}-{datetime.now().strftime('%d%m%y')}"
 
 def fmt(n):
+    """Формат числа: 1 знак после точки если дробное, иначе целое"""
     if n == int(n):
         return str(int(n))
     return f"{n:.1f}"
-
-
 
 # === КОМАНДЫ ===
 
@@ -85,7 +84,7 @@ async def get_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['current']['qty'] = int(update.message.text)
-        await update.message.reply_text('💰 Цена клиенту за 1 шт (¥):')
+        await update.message.reply_text('💰 Цена клиенту за 1 шт (CNY):')
         return PRICE
     except:
         await update.message.reply_text('❌ Число! Количество:')
@@ -95,7 +94,7 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['current']['price'] = float(update.message.text)
-        await update.message.reply_text('🚚 Доставка (¥):')
+        await update.message.reply_text('🚚 Доставка (CNY):')
         return DELIVERY
     except:
         await update.message.reply_text('❌ Число! Цена:')
@@ -105,7 +104,7 @@ async def get_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['current']['delivery'] = float(update.message.text)
-        await update.message.reply_text('🏭 Закупка у фабрики за 1 шт (¥):')
+        await update.message.reply_text('🏭 Закупка у фабрики за 1 шт (CNY):')
         return PURCHASE
     except:
         await update.message.reply_text('❌ Число! Доставка:')
@@ -136,7 +135,7 @@ async def more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text('📝 Название товара:')
         return PRODUCT_NAME
     else:
-        await query.edit_message_text('💱 Курс клиенту (например 58):')
+        await update.message.reply_text('💱 Курс клиенту (например 58):')
         return CLIENT_RATE
 
 async def get_client_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,17 +166,17 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Если комиссия меньше 10000 драм → фикс
         if commission_dram < 10000:
             keyboard = [
-                [InlineKeyboardButton("10000 ֏", callback_data='fix_10000')], 
-                [InlineKeyboardButton("15000 ֏", callback_data='fix_15000')]
+                [InlineKeyboardButton("10000 AMD", callback_data='fix_10000')], 
+                [InlineKeyboardButton("15000 AMD", callback_data='fix_15000')]
             ]
-            msg = f"📊 Итого: {fmt(total_yuan)} ¥\nКомиссия 3% = {int(commission_dram)} ֏ (мало)\n\nВыбери фиксированную комиссию:"
+            msg = f"📊 Итого: {fmt(total_yuan)} CNY\nКомиссия 3% = {int(commission_dram)} AMD (мало)\n\nВыбери фиксированную комиссию:"
             await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
             return FIXED_COMMISSION
         else:
             # Комиссия большая → спрашиваем %
             keyboard = [[InlineKeyboardButton("+3%", callback_data='pct_3'), 
                          InlineKeyboardButton("+5%", callback_data='pct_5')]]
-            msg = f"📊 Итого: {fmt(total_yuan)} ¥\nКомиссия 3% = {int(commission_dram)} ֏\n\nВыбери комиссию:"
+            msg = f"📊 Итого: {fmt(total_yuan)} CNY\nКомиссия 3% = {int(commission_dram)} AMD\n\nВыбери комиссию:"
             await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
             return PERCENT
             
@@ -244,7 +243,7 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
     for i in items:
         line_total = i['price'] * i['qty'] + i['delivery']
         lines_yuan.append(line_total)
-        client_msg += f"• {i['name']}:\n{fmt(i['price'])}×{int(i['qty'])}+{fmt(i['delivery'])} = {fmt(line_total)} ¥\n\n"
+        client_msg += f"• {i['name']}:\n{fmt(i['price'])}×{int(i['qty'])}+{fmt(i['delivery'])} = {fmt(line_total)} CNY\n\n"
     
     if len(lines_yuan) > 1:
         formula = "+".join([fmt(l) for l in lines_yuan])
@@ -254,23 +253,23 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
     
     if commission_pct > 0:
         with_commission_yuan = final_dram / client_rate
-        formula += f"+{commission_pct}%={fmt(with_commission_yuan)}x{int(client_rate)}={int(final_dram)}֏"
+        formula += f"+{commission_pct}%={fmt(with_commission_yuan)}x{int(client_rate)}={int(final_dram)}AMD"
     elif fixed_amount > 0:
         formula += f"x{int(client_rate)}={int(total_yuan * client_rate)} (фикс {fixed_amount})"
     else:
-        formula += f"x{int(client_rate)}={int(final_dram)}֏"
+        formula += f"x{int(client_rate)}={int(final_dram)}AMD"
     
     client_msg += f"{formula}\n"
     client_msg += f"━━━━━━━━━━━━\n\n"
-    client_msg += f"💰 ИТОГО (¥): {fmt(total_yuan)}\n"
+    client_msg += f"💰 ИТОГО (CNY): {fmt(total_yuan)}\n"
     
     if commission_pct > 0:
         with_commission_yuan = final_dram / client_rate
-        client_msg += f"📈 С комиссией ({commission_text}): {fmt(with_commission_yuan)} ¥\n"
+        client_msg += f"📈 С комиссией ({commission_text}): {fmt(with_commission_yuan)} CNY\n"
     elif fixed_amount > 0:
-        client_msg += f"📈 Фиксированная комиссия: {fixed_amount} ֏\n"
+        client_msg += f"📈 Фиксированная комиссия: {fixed_amount} AMD\n"
     
-    client_msg += f"💳 К ОПЛАТЕ: {int(final_dram)} ֏"
+    client_msg += f"💳 К ОПЛАТЕ: {int(final_dram)} AMD"
     
     if hasattr(update, 'callback_query'):
         chat_id = update.callback_query.message.chat_id
@@ -281,11 +280,11 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
     # === СООБЩЕНИЕ МНЕ ===
     my_msg = f"💼 МОЙ РАСЧЁТ:\n"
     my_msg += f"{order_code}\n\n"
-    my_msg += f"На закупку(¥): {fmt(total_purchase_yuan)}\n"
-    my_msg += f"На закупку(֏): {on_purchase_dram} ֏\n"
-    my_msg += f"Маржа: {margin_dram} ֏\n"
+    my_msg += f"На закупку(CNY): {fmt(total_purchase_yuan)}\n"
+    my_msg += f"На закупку(AMD): {on_purchase_dram} AMD\n"
+    my_msg += f"Маржа: {margin_dram} AMD\n"
     my_msg += f"Инвойс: {'Да' if invoice else 'Нет'}\n"
-    my_msg += f"💵 Прибыль: {profit_dram} ֏"
+    my_msg += f"💵 Прибыль: {profit_dram} AMD"
     
     if hasattr(update, 'callback_query'):
         chat_id = update.callback_query.message.chat_id
@@ -300,28 +299,28 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
         notion_properties = {
             "Описание товара": {"rich_text": [{"text": {"content": items_description}}]},
             "Количество": {"number": int(total_qty)},
-            "Цена клиенту (¥)": {"number": float(items[0]['price'])},
-            "Цена закупки (¥)": {"number": float(items[0]['purchase'])},
-            "Доставка (¥)": {"number": float(sum(i['delivery'] for i in items))},
-            "ИТОГО (¥)": {"number": float(total_yuan)},
-            "На закупку (¥)": {"number": float(total_purchase_yuan)},
+            "Цена клиенту (CNY)": {"number": float(items[0]['price'])},
+            "Цена закупки (CNY)": {"number": float(items[0]['purchase'])},
+            "Доставка (CNY)": {"number": float(sum(i['delivery'] for i in items))},
+            "ИТОГО (CNY)": {"number": float(total_yuan)},
+            "На закупку (CNY)": {"number": float(total_purchase_yuan)},
             "Комиссия %": {"number": float(commission_pct)},
-            "С комиссией (¥)": {"number": float(final_dram / client_rate) if client_rate > 0 else 0},
-            "К ОПЛАТЕ (֏)": {"number": int(final_dram)},
+            "С комиссией (CNY)": {"number": float(final_dram / client_rate) if client_rate > 0 else 0},
+            "К ОПЛАТЕ (AMD)": {"number": int(final_dram)},
             "Курс клиенту": {"number": float(client_rate)},
             "Курс реальный": {"number": float(real_rate)},
-            "Закупка реальная (֏)": {"number": int(on_purchase_dram)},
-            "На закупку (֏)": {"number": int(on_purchase_dram)},
-            "Маржа (֏)": {"number": int(margin_dram)},
+            "Закупка реальная (AMD)": {"number": int(on_purchase_dram)},
+            "На закупку (AMD)": {"number": int(on_purchase_dram)},
+            "Маржа (AMD)": {"number": int(margin_dram)},
             "Инвойс": {"select": {"name": "Да" if invoice else "Нет"}},
-            "Прибыль (֏)": {"number": int(profit_dram)},
-            "Счёт клиенту (֏)": {"number": int(client_bill_dram)},
+            "Прибыль (AMD)": {"number": int(profit_dram)},
+            "Счёт клиенту (AMD)": {"number": int(client_bill_dram)},
             "Клиент": {"select": {"name": client}},
             "Статус": {"select": {"name": "Поиск — жду цену"}},
         }
         
         if fixed_amount > 0:
-            notion_properties["Фиксированная комиссия (֏)"] = {"number": int(fixed_amount)}
+            notion_properties["Фиксированная комиссия (AMD)"] = {"number": int(fixed_amount)}
         
         notion.pages.create(
             parent={"database_id": NOTION_DATABASE_ID},
