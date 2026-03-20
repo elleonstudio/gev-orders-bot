@@ -35,8 +35,8 @@ def fmt(n):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        '👋 Привет! Бот для заказов.\n\n'
-        '📋 Команды:\n'
+        'Привет! Бот для заказов.\n\n'
+        'Команды:\n'
         '/zakaz [имя] — новый заказ\n'
         '/nayti [текст] — найти заказ\n'
         '/cancel — отменить'
@@ -47,7 +47,7 @@ async def zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = text.split(maxsplit=1)
     
     if len(parts) < 2:
-        await update.message.reply_text('❌ Укажи имя: /zakaz Армен')
+        await update.message.reply_text('Укажи имя: /zakaz Армен')
         return ConversationHandler.END
     
     name = parts[1].strip()
@@ -62,7 +62,7 @@ async def zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [[InlineKeyboardButton("Да", callback_data='inv_yes'), 
                  InlineKeyboardButton("Нет", callback_data='inv_no')]]
-    await update.message.reply_text(f'📦 Заказ для: {name}\n\nИнвойс?', reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(f'Заказ для: {name}\n\nИнвойс?', reply_markup=InlineKeyboardMarkup(keyboard))
     return INVOICE
 
 async def invoice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -71,43 +71,43 @@ async def invoice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     
     orders[uid]['invoice'] = (query.data == 'inv_yes')
-    await query.edit_message_text('📝 Название товара:')
+    await query.edit_message_text('Название товара:')
     return PRODUCT_NAME
 
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     orders[uid]['current']['name'] = update.message.text
-    await update.message.reply_text('🔢 Количество:')
+    await update.message.reply_text('Количество:')
     return QUANTITY
 
 async def get_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['current']['qty'] = int(update.message.text)
-        await update.message.reply_text('💰 Цена клиенту за 1 шт (CNY):')
+        await update.message.reply_text('Цена клиенту за 1 шт (CNY):')
         return PRICE
     except:
-        await update.message.reply_text('❌ Число! Количество:')
+        await update.message.reply_text('Число! Количество:')
         return QUANTITY
 
 async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['current']['price'] = float(update.message.text)
-        await update.message.reply_text('🚚 Доставка (CNY):')
+        await update.message.reply_text('Доставка (CNY):')
         return DELIVERY
     except:
-        await update.message.reply_text('❌ Число! Цена:')
+        await update.message.reply_text('Число! Цена:')
         return PRICE
 
 async def get_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['current']['delivery'] = float(update.message.text)
-        await update.message.reply_text('🏭 Закупка у фабрики за 1 шт (CNY):')
+        await update.message.reply_text('Закупка у фабрики за 1 шт (CNY):')
         return PURCHASE
     except:
-        await update.message.reply_text('❌ Число! Доставка:')
+        await update.message.reply_text('Число! Доставка:')
         return DELIVERY
 
 async def get_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,12 +115,12 @@ async def get_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         orders[uid]['current']['purchase'] = float(update.message.text)
         
-        keyboard = [[InlineKeyboardButton("✅ Да", callback_data='more_yes'), 
-                     InlineKeyboardButton("❌ Нет", callback_data='more_no')]]
+        keyboard = [[InlineKeyboardButton("Да", callback_data='more_yes'), 
+                     InlineKeyboardButton("Нет", callback_data='more_no')]]
         await update.message.reply_text('Ещё товар?', reply_markup=InlineKeyboardMarkup(keyboard))
         return MORE
     except:
-        await update.message.reply_text('❌ Число! Закупка:')
+        await update.message.reply_text('Число! Закупка:')
         return PURCHASE
 
 async def more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -132,20 +132,20 @@ async def more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == 'more_yes':
         orders[uid]['current'] = {}
-        await query.message.reply_text('📝 Название товара:')
+        await query.message.reply_text('Название товара:')
         return PRODUCT_NAME
     else:
-        await query.message.reply_text('💱 Курс клиенту (например 58):')
+        await query.message.reply_text('Курс клиенту (например 58):')
         return CLIENT_RATE
 
 async def get_client_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['client_rate'] = float(update.message.text)
-        await update.message.reply_text('💱 Курс реальный (например 55):')
+        await update.message.reply_text('Курс реальный (например 55):')
         return REAL_RATE
     except:
-        await update.message.reply_text('❌ Число! Курс:')
+        await update.message.reply_text('Число! Курс:')
         return CLIENT_RATE
 
 async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -166,18 +166,18 @@ async def get_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("10000 AMD", callback_data='fix_10000')], 
                 [InlineKeyboardButton("15000 AMD", callback_data='fix_15000')]
             ]
-            msg = f"📊 Итого: {fmt(total_yuan)} CNY\nКомиссия 3% = {int(commission_dram)} AMD (мало)\n\nВыбери фиксированную комиссию:"
+            msg = f"Итого: {fmt(total_yuan)} CNY\nКомиссия 3% = {int(commission_dram)} AMD (мало)\n\nВыбери фиксированную комиссию:"
             await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
             return FIXED_COMMISSION
         else:
             keyboard = [[InlineKeyboardButton("+3%", callback_data='pct_3'), 
                          InlineKeyboardButton("+5%", callback_data='pct_5')]]
-            msg = f"📊 Итого: {fmt(total_yuan)} CNY\nКомиссия 3% = {int(commission_dram)} AMD\n\nВыбери комиссию:"
+            msg = f"Итого: {fmt(total_yuan)} CNY\nКомиссия 3% = {int(commission_dram)} AMD\n\nВыбери комиссию:"
             await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
             return PERCENT
             
     except:
-        await update.message.reply_text('❌ Число! Курс:')
+        await update.message.reply_text('Число! Курс:')
         return REAL_RATE
 
 async def fixed_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -325,26 +325,10 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
         await context.bot.send_message(chat_id=chat_id, text=my_msg)
     else:
         await update.message.reply_text(my_msg)
-
-    
-    # === СООБЩЕНИЕ МНЕ ===
-    my_msg = f"💼 МОЙ РАСЧЁТ:\n"
-    my_msg += f"{order_code}\n\n"
-    my_msg += f"На закупку(CNY): {fmt(total_purchase_yuan)}\n"
-    my_msg += f"На закупку(AMD): {on_purchase_dram} AMD\n"
-    my_msg += f"Маржа: {margin_dram} AMD\n"
-    my_msg += f"Инвойс: {'Да' if invoice else 'Нет'}\n"
-    my_msg += f"💵 Прибыль: {profit_dram} AMD"
-    
-    if hasattr(update, 'callback_query'):
-        chat_id = update.callback_query.message.chat_id
-        await context.bot.send_message(chat_id=chat_id, text=my_msg)
-    else:
-        await update.message.reply_text(my_msg)
     
     # === NOTION ===
     try:
-        items_description = "; ".join([f"{i['name']} (×{int(i['qty'])})" for i in items])
+        items_description = "; ".join([f"{i['name']} (x{int(i['qty'])})" for i in items])
         
         notion_properties = {
             "Описание товара": {"rich_text": [{"text": {"content": items_description}}]},
@@ -379,13 +363,13 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
         
         if hasattr(update, 'callback_query'):
             chat_id = update.callback_query.message.chat_id
-            await context.bot.send_message(chat_id=chat_id, text="✅ Сохранено в Notion")
+            await context.bot.send_message(chat_id=chat_id, text="Сохранено в Notion")
         else:
-            await update.message.reply_text("✅ Сохранено в Notion")
+            await update.message.reply_text("Сохранено в Notion")
             
     except Exception as e:
         logging.error(f"Notion error: {e}")
-        error_msg = f"⚠️ Ошибка Notion: {str(e)[:400]}"
+        error_msg = f"Ошибка Notion: {str(e)[:400]}"
         if hasattr(update, 'callback_query'):
             chat_id = update.callback_query.message.chat_id
             await context.bot.send_message(chat_id=chat_id, text=error_msg)
@@ -398,13 +382,13 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid in orders:
         del orders[uid]
-    await update.message.reply_text('❌ Отменено')
+    await update.message.reply_text('Отменено')
     return ConversationHandler.END
 
 async def nayti(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.message.text.replace('/nayti', '').strip()
     if not q:
-        await update.message.reply_text('🔍 /nayти текст')
+        await update.message.reply_text('/nayти текст')
         return
     
     try:
@@ -421,7 +405,7 @@ async def nayti(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text('Ничего не найдено')
             return
         
-        msg = f"🔍 Найдено: {len(results)}\n\n"
+        msg = f"Найдено: {len(results)}\n\n"
         for r in results[:5]:
             p = r['properties']
             name = p['Описание товара']['rich_text'][0]['text']['content'] if p['Описание товара']['rich_text'] else '-'
