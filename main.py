@@ -23,7 +23,7 @@ TARIFFS = {
     "Тула": 500,
     "Рязань": 700,
     "Котовск": 750,
-    "Казань": 800,  # 1-7 коробов
+    "Казань": 800,
     "Казань (8-10)": 650,
     "Краснодар": 1100,
     "Невинномысск": 1100,
@@ -32,15 +32,16 @@ TARIFFS = {
     "Пенза": 800,
     "Владимир": 700,
     "Сарапул": 1200,
-    "Екатеринбург": 1400,  # 1-5
+    "Екатеринбург": 1400,
     "Екатеринбург (6-10)": 1200,
 }
 
 # Состояния
 (INVOICE, PRODUCT_NAME, QUANTITY, PRICE, PURCHASE, DELIVERY_FACTORY,
- DIMENSIONS, PACKAGE_SELECT, MORE, CLIENT_RATE, REAL_RATE, RUB_RATE,
- FF_PICKUP, FF_BOX_PRICE, FF_STICKER_PRICE, THERMAL_PAPER_PRICE, THERMAL_PAPER_QTY, FF_WORK_PRICE,
- WAREHOUSE, BOX_COUNT, CRATING) = range(21)
+ DIMENSIONS, PACKAGE_SELECT, MORE, NEED_FF,  # NEW: спрашиваем нужен ли FF
+ CLIENT_RATE, REAL_RATE, RUB_RATE,
+ FF_PICKUP, FF_BOX_PRICE, FF_STICKER_PRICE, THERMAL_PAPER_QTY, FF_WORK_PRICE,
+ WAREHOUSE, BOX_COUNT, CRATING) = range(22)
 
 orders = {}
 packages_cache = None
@@ -55,10 +56,12 @@ def fmt(n):
 
 def calculate_boxes(length, width, height, total_qty):
     """Расчёт сколько товаров влезет в короб 60×40×40"""
-    box_volume = 60 * 40 * 40  # 96000 см³
+    box_volume = 60 * 40 * 40
     item_volume = length * width * height
+    if item_volume == 0:
+        return 0, 0
     items_per_box = box_volume // item_volume
-    boxes_needed = math.ceil(total_qty / items_per_box)
+    boxes_needed = math.ceil(total_qty / items_per_box) if items_per_box > 0 else 1
     return items_per_box, boxes_needed
 
 async def get_packages_from_notion():
@@ -83,7 +86,6 @@ async def get_packages_from_notion():
             if pkg['name'] and pkg['length'] > 0:
                 packages.append(pkg)
         
-        # Сортируем по объёму (от малого к большому)
         packages.sort(key=lambda x: x['length'] * x['width'] * x['height'])
         packages_cache = packages
         return packages
@@ -93,22 +95,18 @@ async def get_packages_from_notion():
 
 def find_best_package(packages, item_length, item_width, item_height):
     """Найти лучший пакет для товара"""
-    # Сортируем размеры товара (от большего к меньшему)
     item_dims = sorted([item_length, item_width, item_height], reverse=True)
     
     best_pkg = None
     min_volume_diff = float('inf')
     
     for pkg in packages:
-        # Сортируем размеры пакета
         pkg_dims = sorted([pkg['length'], pkg['width'], pkg['height']], reverse=True)
         
-        # Проверяем помещается ли товар
         if (pkg_dims[0] >= item_dims[0] and 
             pkg_dims[1] >= item_dims[1] and 
             pkg_dims[2] >= item_dims[2]):
             
-            # Считаем разницу в объёме (чем меньше, тем лучше)
             item_vol = item_length * item_width * item_height
             pkg_vol = pkg['length'] * pkg['width'] * pkg['height']
             volume_diff = pkg_vol - item_vol
@@ -151,7 +149,6 @@ async def zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = parts[1].strip()
     uid = update.effective_user.id
     
-    # Проверяем историю заказов
     history = await get_client_orders(name)
     
     if history:
@@ -172,7 +169,7 @@ async def zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f'Заказ для: {name}\n\nНазвание товара:')
     
-    orders[uid] = {'client': name, 'items': [], 'current': {}, 'invoice': False}
+    orders[uid] = {'client': name, 'items': [], 'current': {}, 'invoice': False, 'need_ff': True}
     return INVOICE if not history else PRODUCT_NAME
 
 async def repeat_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -185,7 +182,6 @@ async def repeat_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text('Название товара:')
         return PRODUCT_NAME
     
-    # Повторяем заказ
     order_id = data.replace('repeat_', '')
     try:
         order = notion.pages.retrieve(page_id=order_id)
@@ -245,7 +241,6 @@ async def invoice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         orders[uid]['invoice'] = False
     
-    # Если это повтор заказа и данные уже есть
     if orders[uid]['current'].get('name'):
         await query.edit_message_text('Введи размеры 1 шт (Д Ш В в см, через пробел):\nНапример: 15 10 8')
         return DIMENSIONS
@@ -316,7 +311,6 @@ async def get_dimensions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         items_per_box, boxes = calculate_boxes(l, w, h, qty)
         orders[uid]['current']['boxes'] = boxes
         
-        # Получаем пакеты и ищем подходящий
         packages = await get_packages_from_notion()
         best_pkg = find_best_package(packages, l, w, h)
         
@@ -362,7 +356,6 @@ async def package_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     if data == 'pkg_ok':
-        # Пакет подтверждён, переходим к следующему шагу
         keyboard = [[InlineKeyboardButton("Да", callback_data='more_yes'), 
                      InlineKeyboardButton("Нет", callback_data='more_no')]]
         await query.edit_message_text(
@@ -374,12 +367,11 @@ async def package_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return MORE
         
     elif data == 'pkg_select':
-        # Показываем список всех пакетов
         packages = await get_packages_from_notion()
         keyboard = []
-        for pkg in packages[:10]:  # Показываем первые 10
+        for pkg in packages[:10]:
             keyboard.append([InlineKeyboardButton(
-                f'{pkg["name"]} ({pkg["length"]}×{pkg["width"]}×{pkg["height"]}) — {pkg["price"]}¥',
+                f'{pkg["name"]} ({int(pkg["length"])}×{int(pkg["width"])}×{int(pkg["height"])}) — {pkg["price"]}¥',
                 callback_data=f'pkg_{pkg["id"]}'
             )])
         keyboard.append([InlineKeyboardButton("💬 Своя цена", callback_data='pkg_custom')])
@@ -392,7 +384,6 @@ async def package_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return FF_STICKER_PRICE
         
     elif data.startswith('pkg_'):
-        # Выбран конкретный пакет
         pkg_id = data.replace('pkg_', '')
         packages = await get_packages_from_notion()
         selected_pkg = next((p for p in packages if p['id'] == pkg_id), None)
@@ -426,8 +417,101 @@ async def more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return PRODUCT_NAME
     else:
         orders[uid]['items'].append(orders[uid]['current'])
-        await query.message.reply_text('Курс клиенту ¥→драм (например 58):')
+        # NEW: Спрашиваем нужен ли FF в Китае
+        total_qty = sum(i['qty'] for i in orders[uid]['items'])
+        keyboard = [
+            [InlineKeyboardButton("✅ Да, нужен FF в Китае", callback_data='ff_yes')],
+            [InlineKeyboardButton("❌ Нет, пропустить FF", callback_data='ff_no')]
+        ]
+        await query.message.reply_text(
+            f'Всего товаров: {total_qty} шт\n\n'
+            f'Нужен фулфилмент (FF) в Китае?',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return NEED_FF
+
+async def need_ff_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = update.effective_user.id
+    
+    if query.data == 'ff_yes':
+        orders[uid]['need_ff'] = True
+        await query.edit_message_text('FF Китай — Забор груза (¥):')
+        return FF_PICKUP
+    else:
+        orders[uid]['need_ff'] = False
+        # Пропускаем все FF-вопросы, сразу к курсам
+        await query.edit_message_text('Курс клиенту ¥→драм (например 58):')
         return CLIENT_RATE
+
+async def get_ff_pickup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    try:
+        orders[uid]['ff_pickup'] = float(update.message.text)
+        boxes = sum(i.get('boxes', 1) for i in orders[uid]['items'])
+        await update.message.reply_text(f'FF — Коробки 60×40×40 (¥ за шт, всего {boxes} шт):')
+        return FF_BOX_PRICE
+    except:
+        await update.message.reply_text('Число!')
+        return FF_PICKUP
+
+async def get_ff_box(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    try:
+        price = float(update.message.text)
+        boxes = sum(i.get('boxes', 1) for i in orders[uid]['items'])
+        orders[uid]['ff_boxes'] = price * boxes
+        total_qty = sum(i['qty'] for i in orders[uid]['items'])
+        await update.message.reply_text(f'FF — Термонаклейки (¥ за шт × {total_qty}):')
+        return FF_STICKER_PRICE
+    except:
+        await update.message.reply_text('Число!')
+        return FF_BOX_PRICE
+
+async def get_ff_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    try:
+        price = float(update.message.text)
+        total_qty = sum(i['qty'] for i in orders[uid]['items'])
+        orders[uid]['ff_stickers'] = price * total_qty
+        # Термобумага: фиксированная цена 0.016¥, спрашиваем только количество
+        await update.message.reply_text(
+            f'FF — Термобумага (0.016¥ за шт)\n\n'
+            f'Сколько термобумаги на 1 товар? (шт)\nНапример: 1'
+        )
+        return THERMAL_PAPER_QTY
+    except:
+        await update.message.reply_text('Число!')
+        return FF_STICKER_PRICE
+
+async def get_thermal_paper_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    try:
+        qty_per_item = float(update.message.text)
+        total_qty = sum(i['qty'] for i in orders[uid]['items'])
+        # Фиксированная цена 0.016¥
+        orders[uid]['ff_thermal_paper'] = 0.016 * qty_per_item * total_qty
+        
+        await update.message.reply_text(f'FF — Работа (¥ за 1 шт × {total_qty}):')
+        return FF_WORK_PRICE
+    except:
+        await update.message.reply_text('Число!')
+        return THERMAL_PAPER_QTY
+
+async def get_ff_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    try:
+        price = float(update.message.text)
+        total_qty = sum(i['qty'] for i in orders[uid]['items'])
+        orders[uid]['ff_work'] = price * total_qty
+        
+        # После FF вопросов — курс клиенту
+        await update.message.reply_text('Курс клиенту ¥→драм (например 58):')
+        return CLIENT_RATE
+    except:
+        await update.message.reply_text('Число!')
+        return FF_WORK_PRICE
 
 async def get_client_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -453,83 +537,10 @@ async def get_rub_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['rub_rate'] = float(update.message.text)
-        await update.message.reply_text('FF Китай — Забор груза (¥):')
-        return FF_PICKUP
-    except:
-        await update.message.reply_text('Число! Курс:')
-        return RUB_RATE
-
-async def get_ff_pickup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    try:
-        orders[uid]['ff_pickup'] = float(update.message.text)
-        boxes = sum(i.get('boxes', 1) for i in orders[uid]['items'])
-        await update.message.reply_text(f'FF — Коробки 60×40×40 (¥ за шт, всего {boxes} шт):')
-        return FF_BOX_PRICE
-    except:
-        await update.message.reply_text('Число!')
-        return FF_PICKUP
-
-async def get_ff_box(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    try:
-        price = float(update.message.text)
-        boxes = sum(i.get('boxes', 1) for i in orders[uid]['items'])
-        orders[uid]['ff_boxes'] = price * boxes
-        await update.message.reply_text('FF — Термонаклейки (¥ за шт × количество товаров):')
-        return FF_STICKER_PRICE
-    except:
-        await update.message.reply_text('Число!')
-        return FF_BOX_PRICE
-
-async def get_ff_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    try:
-        price = float(update.message.text)
-        total_qty = sum(i['qty'] for i in orders[uid]['items'])
-        orders[uid]['ff_stickers'] = price * total_qty
-        # Переходим к термобумаге
-        await update.message.reply_text('FF — Термобумага: цена за 1 шт (¥)\nНапример: 0.016')
-        return THERMAL_PAPER_PRICE
-    except:
-        await update.message.reply_text('Число!')
-        return FF_STICKER_PRICE
-
-async def get_thermal_paper_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    try:
-        price = float(update.message.text)
-        orders[uid]['thermal_paper_price'] = price
-        await update.message.reply_text('Сколько термобумаги на 1 товар? (шт/метров)\nНапример: 1')
-        return THERMAL_PAPER_QTY
-    except:
-        await update.message.reply_text('Число!')
-        return THERMAL_PAPER_PRICE
-
-async def get_thermal_paper_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    try:
-        qty_per_item = float(update.message.text)
-        total_qty = sum(i['qty'] for i in orders[uid]['items'])
-        price = orders[uid]['thermal_paper_price']
-        orders[uid]['ff_thermal_paper'] = price * qty_per_item * total_qty
-        
-        await update.message.reply_text(f'FF — Работа (¥ за 1 шт × {total_qty}):')
-        return FF_WORK_PRICE
-    except:
-        await update.message.reply_text('Число!')
-        return THERMAL_PAPER_QTY
-
-async def get_ff_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    try:
-        price = float(update.message.text)
-        total_qty = sum(i['qty'] for i in orders[uid]['items'])
-        orders[uid]['ff_work'] = price * total_qty
         
         # Показываем список складов
         keyboard = []
-        cities = list(TARIFFS.keys())
+        cities = [c for c in TARIFFS.keys() if '(' not in c]  # Только основные города
         for i in range(0, len(cities), 2):
             row = [InlineKeyboardButton(cities[i], callback_data=f'wh_{cities[i]}')]
             if i + 1 < len(cities):
@@ -539,8 +550,8 @@ async def get_ff_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('Выбери склад РФ:', reply_markup=InlineKeyboardMarkup(keyboard))
         return WAREHOUSE
     except:
-        await update.message.reply_text('Число!')
-        return FF_WORK_PRICE
+        await update.message.reply_text('Число! Курс:')
+        return RUB_RATE
 
 async def warehouse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -609,6 +620,7 @@ async def calculate_and_show_result(update, context):
     real_rate = orders[uid]['real_rate']
     rub_rate = orders[uid]['rub_rate']
     invoice = orders[uid]['invoice']
+    need_ff = orders[uid].get('need_ff', True)
     
     order_code = get_code(client)
     total_qty = sum(i['qty'] for i in items)
@@ -619,20 +631,25 @@ async def calculate_and_show_result(update, context):
     total_purchase_yuan = sum(i['purchase'] * i['qty'] for i in items)
     delivery_factory_yuan = sum(i.get('delivery_factory', 0) for i in items)
     
-    # Пакеты (из подбора или ручной ввод)
+    # Пакеты
     total_packages_yuan = sum(i.get('package_total', 0) for i in items)
     
-    # FF Китай
-    ff_pickup = orders[uid].get('ff_pickup', 0)
-    ff_boxes = orders[uid].get('ff_boxes', 0)
-    ff_stickers = orders[uid].get('ff_stickers', 0)
-    ff_thermal_paper = orders[uid].get('ff_thermal_paper', 0)
-    ff_work = orders[uid].get('ff_work', 0)
-    ff_total_yuan = ff_pickup + ff_boxes + total_packages_yuan + ff_stickers + ff_thermal_paper + ff_work
+    # FF Китай (только если нужен)
+    if need_ff:
+        ff_pickup = orders[uid].get('ff_pickup', 0)
+        ff_boxes = orders[uid].get('ff_boxes', 0)
+        ff_stickers = orders[uid].get('ff_stickers', 0)
+        ff_thermal_paper = orders[uid].get('ff_thermal_paper', 0)
+        ff_work = orders[uid].get('ff_work', 0)
+        ff_total_yuan = ff_pickup + ff_boxes + total_packages_yuan + ff_stickers + ff_thermal_paper + ff_work
+    else:
+        ff_pickup = ff_boxes = ff_stickers = ff_thermal_paper = ff_work = 0
+        ff_total_yuan = 0
+    
     ff_total_amd = int(ff_total_yuan * real_rate)
     
     # FILLX
-    fillx_pickup = 7000  # фикс
+    fillx_pickup = 7000
     fillx_crating = orders[uid].get('fillx_crating', 0)
     fillx_receiving = 1000 * total_boxes
     fillx_delivery = orders[uid].get('fillx_delivery', 0)
@@ -653,7 +670,8 @@ async def calculate_and_show_result(update, context):
     for i in items:
         client_msg += f"• {i['name']} × {int(i['qty'])}\n"
     client_msg += f"\nТовары: {fmt(total_yuan)} ¥\n"
-    client_msg += f"Фулфилмент Китай: {fmt(ff_total_yuan)} ¥\n"
+    if need_ff:
+        client_msg += f"Фулфилмент Китай: {fmt(ff_total_yuan)} ¥\n"
     client_msg += f"━━━━━━━━━━━━\n"
     client_msg += f"ИТОГО ¥: {fmt(client_total_yuan)}\n"
     client_msg += f"К ОПЛАТЕ: {client_total_amd} AMD"
@@ -664,14 +682,15 @@ async def calculate_and_show_result(update, context):
     my_msg += f"Товар: {fmt(total_purchase_yuan)}¥ = {purchase_amd} AMD\n"
     my_msg += f"Доставка фабрика→FF: {fmt(delivery_factory_yuan)}¥\n\n"
     
-    my_msg += f"─── FF КИТАЙ ({fmt(ff_total_yuan)}¥ × {real_rate}) ───\n"
-    my_msg += f"Забор: {fmt(ff_pickup)}¥\n"
-    my_msg += f"Коробки: {fmt(ff_boxes)}¥\n"
-    my_msg += f"Пакеты: {fmt(total_packages_yuan)}¥\n"
-    my_msg += f"Наклейки: {fmt(ff_stickers)}¥\n"
-    my_msg += f"Термобумага: {fmt(ff_thermal_paper)}¥\n"
-    my_msg += f"Работа: {fmt(ff_work)}¥\n"
-    my_msg += f"Итого FF: {ff_total_amd} AMD\n\n"
+    if need_ff:
+        my_msg += f"─── FF КИТАЙ ({fmt(ff_total_yuan)}¥ × {real_rate}) ───\n"
+        my_msg += f"Забор: {fmt(ff_pickup)}¥\n"
+        my_msg += f"Коробки: {fmt(ff_boxes)}¥\n"
+        my_msg += f"Пакеты: {fmt(total_packages_yuan)}¥\n"
+        my_msg += f"Наклейки: {fmt(ff_stickers)}¥\n"
+        my_msg += f"Термобумага: {fmt(ff_thermal_paper)}¥\n"
+        my_msg += f"Работа: {fmt(ff_work)}¥\n"
+        my_msg += f"Итого FF: {ff_total_amd} AMD\n\n"
     
     my_msg += f"─── FILLX ({fillx_total_rub}₽ × {rub_rate}) ───\n"
     my_msg += f"Забор IOB: 7000₽\n"
@@ -795,13 +814,13 @@ def main():
                 CallbackQueryHandler(package_select_cb, pattern='^(pkg_ok|pkg_select|pkg_custom|pkg_)')
             ],
             MORE: [CallbackQueryHandler(more_cb, pattern='^more_')],
+            NEED_FF: [CallbackQueryHandler(need_ff_cb, pattern='^ff_')],  # NEW
             CLIENT_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_rate)],
             REAL_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_real_rate)],
             RUB_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_rub_rate)],
             FF_PICKUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_ff_pickup)],
             FF_BOX_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_ff_box)],
             FF_STICKER_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_ff_sticker)],
-            THERMAL_PAPER_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_thermal_paper_price)],
             THERMAL_PAPER_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_thermal_paper_qty)],
             FF_WORK_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_ff_work)],
             WAREHOUSE: [CallbackQueryHandler(warehouse_cb, pattern='^wh_')],
@@ -817,4 +836,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
