@@ -13,6 +13,24 @@ NOTION_DATABASE_ID = os.getenv('NOTION_DATABASE_ID')
 
 notion = Client(auth=NOTION_TOKEN)
 
+# === ДЕБАГ: Показать все свойства базы ===
+def debug_notion_properties():
+    try:
+        db = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
+        props = db.get('properties', {})
+        logging.info("=== NOTION DATABASE PROPERTIES ===")
+        for name, config in props.items():
+            prop_type = config.get('type', 'unknown')
+            logging.info(f"  '{name}' : {prop_type}")
+        logging.info("====================================")
+        return props
+    except Exception as e:
+        logging.error(f"Failed to get Notion properties: {e}")
+        return {}
+
+# Получаем свойства при старте
+NOTION_PROPS = debug_notion_properties()
+
 INVOICE, PRODUCT_NAME, QUANTITY, PRICE, DELIVERY, PURCHASE, MORE, CLIENT_RATE, REAL_RATE, PERCENT, FIXED_COMMISSION = range(11)
 orders = {}
 
@@ -24,12 +42,31 @@ def fmt(n):
         return str(int(n))
     return f"{n:.1f}"
 
+# === КОМАНДА ДЕБАГА ===
+async def debug_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать все свойства базы Notion"""
+    try:
+        db = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
+        props = db.get('properties', {})
+        
+        msg = "📋 Свойства базы Notion:\n\n"
+        for name, config in props.items():
+            prop_type = config.get('type', 'unknown')
+            msg += f"• '{name}' ({prop_type})\n"
+        
+        await update.message.reply_text(msg[:4000])  # Лимит Telegram
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+
+# === ОСТАЛЬНОЙ КОД ===
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         'Привет! Бот для заказов.\n\n'
         'Команды:\n'
         '/zakaz [имя] — новый заказ\n'
         '/nayti [текст] — найти заказ\n'
+        '/debug — показать свойства Notion\n'
         '/cancel — отменить'
     )
 
@@ -282,8 +319,12 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
     else:
         await update.message.reply_text(my_msg)
     
+    # === NOTION с проверкой ===
     try:
         items_description = "; ".join([f"{i['name']} (x{int(i['qty'])})" for i in items])
+        
+        # Показываем что отправляем
+        logging.info(f"Creating Notion page with {len(items)} items for {client}")
         
         notion_properties = {
             "Описание товара": {"rich_text": [{"text": {"content": items_description}}]},
@@ -293,23 +334,33 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
             "Доставка (CNY)": {"number": float(sum(i['delivery'] for i in items))},
             "ИТОГО (CNY)": {"number": float(total_yuan)},
             "На закупку (CNY)": {"number": float(total_purchase_yuan)},
-            "Комиссия": {"number": float(commission_pct)},
-            "С комиссией (CNY)": {"number": float(final_dram / client_rate) if client_rate > 0 else 0},
-            "К ОПЛАТЕ (AMD)": {"number": int(final_dram)},
             "Курс клиенту": {"number": float(client_rate)},
             "Курс реальный": {"number": float(real_rate)},
             "Закупка реальная (AMD)": {"number": int(on_purchase_dram)},
             "На закупку (AMD)": {"number": int(on_purchase_dram)},
             "Маржа (AMD)": {"number": int(margin_dram)},
-            "Инвойс": {"select": {"name": "Да" if invoice else "Нет"}},
             "Прибыль (AMD)": {"number": int(profit_dram)},
             "Счёт клиенту (AMD)": {"number": int(client_bill_dram)},
             "Клиент": {"select": {"name": client}},
-            "Статус": {"select": {"name": "Поиск — жду цену"}},
         }
         
-        if fixed_amount > 0:
+        # Добавляем опциональные поля только если они есть в базе
+        prop_names = list(NOTION_PROPS.keys())
+        
+        if "Комиссия" in prop_names:
+            notion_properties["Комиссия"] = {"number": float(commission_pct)}
+        if "С комиссией (CNY)" in prop_names:
+            notion_properties["С комиссией (CNY)"] = {"number": float(final_dram / client_rate) if client_rate > 0 else 0}
+        if "К ОПЛАТЕ (AMD)" in prop_names:
+            notion_properties["К ОПЛАТЕ (AMD)"] = {"number": int(final_dram)}
+        if "Инвойс" in prop_names:
+            notion_properties["Инвойс"] = {"select": {"name": "Да" if invoice else "Нет"}}
+        if "Фикс комиссия" in prop_names and fixed_amount > 0:
             notion_properties["Фикс комиссия"] = {"number": int(fixed_amount)}
+        if "Статус" in prop_names:
+            notion_properties["Статус"] = {"select": {"name": "Поиск — жду цену"}}
+        
+        logging.info(f"Sending properties: {list(notion_properties.keys())}")
         
         notion.pages.create(
             parent={"database_id": NOTION_DATABASE_ID},
@@ -318,13 +369,13 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
         
         if hasattr(update, 'callback_query'):
             chat_id = update.callback_query.message.chat_id
-            await context.bot.send_message(chat_id=chat_id, text="Сохранено в Notion")
+            await context.bot.send_message(chat_id=chat_id, text="✅ Сохранено в Notion")
         else:
-            await update.message.reply_text("Сохранено в Notion")
+            await update.message.reply_text("✅ Сохранено в Notion")
             
     except Exception as e:
         logging.error(f"Notion error: {e}")
-        error_msg = f"Ошибка Notion: {str(e)[:400]}"
+        error_msg = f"❌ Ошибка Notion: {str(e)[:400]}"
         if hasattr(update, 'callback_query'):
             chat_id = update.callback_query.message.chat_id
             await context.bot.send_message(chat_id=chat_id, text=error_msg)
@@ -375,6 +426,7 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler('start', start))
+    app.add_handler(CommandHandler('debug', debug_cmd))  # Добавляем команду дебага
     
     conv = ConversationHandler(
         entry_points=[CommandHandler('zakaz', zakaz)],
