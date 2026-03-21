@@ -5,33 +5,24 @@ from notion_client import Client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
 
-# Настройка
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Получаем токены из переменных окружения Railway
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 NOTION_TOKEN = os.getenv('NOTION_TOKEN')
 NOTION_DATABASE_ID = os.getenv('NOTION_DATABASE_ID')
 
 notion = Client(auth=NOTION_TOKEN)
 
-# Состояния диалога
 INVOICE, PRODUCT_NAME, QUANTITY, PRICE, DELIVERY, PURCHASE, MORE, CLIENT_RATE, REAL_RATE, PERCENT, FIXED_COMMISSION = range(11)
-
-# Хранилище заказов (в памяти)
 orders = {}
 
 def get_code(name):
-"""Формат: NAME-DDMMYY"""
 return f"{name.upper()}-{datetime.now().strftime('%d%m%y')}"
 
 def fmt(n):
-"""Формат числа: 1 знак после точки если дробное, иначе целое"""
 if n == int(n):
 return str(int(n))
 return f"{n:.1f}"
-
-# === КОМАНДЫ ===
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 await update.message.reply_text(
@@ -240,14 +231,12 @@ profit_dram = int(margin_dram * 0.9) if invoice else margin_dram
 
 client_bill_dram = int(final_dram)
 
-# === СООБЩЕНИЕ КЛИЕНТУ (ПЕРВОЕ) ===
 client_msg = f"{order_code}\n\n"
 
 for i in items:
 line_total = i['price'] * i['qty'] + i['delivery']
 client_msg += f"• {i['name']}:\n{fmt(i['price'])}x{int(i['qty'])}+{fmt(i['delivery'])} = {fmt(line_total)} CNY\n\n"
 
-# Формула расчета
 if len(items) > 1:
 lines_yuan = [i['price'] * i['qty'] + i['delivery'] for i in items]
 formula = "+".join([fmt(l) for l in lines_yuan])
@@ -281,7 +270,6 @@ await context.bot.send_message(chat_id=chat_id, text=client_msg)
 else:
 await update.message.reply_text(client_msg)
 
-# === СООБЩЕНИЕ МНЕ (ВТОРОЕ) ===
 my_msg = f"МОЙ РАСЧЁТ:\n"
 my_msg += f"{order_code}\n\n"
 my_msg += f"На закупку(CNY): {fmt(total_purchase_yuan)}\n"
@@ -294,11 +282,9 @@ await context.bot.send_message(chat_id=chat_id, text=my_msg)
 else:
 await update.message.reply_text(my_msg)
 
-# === NOTION ===
 try:
 items_description = "; ".join([f"{i['name']} (x{int(i['qty'])})" for i in items])
 
-# ИСПРАВЛЕННЫЕ названия свойств — точно как в Notion
 notion_properties = {
 "Описание товара": {"rich_text": [{"text": {"content": items_description}}]},
 "Количество": {"number": int(total_qty)},
@@ -322,7 +308,6 @@ notion_properties = {
 "Статус": {"select": {"name": "Поиск — жду цену"}},
 }
 
-# ИСПРАВЛЕНО: название свойства "Фикс комиссия" (без "ированная" и без "(AMD)")
 if fixed_amount > 0:
 notion_properties["Фикс комиссия"] = {"number": int(fixed_amount)}
 
@@ -385,8 +370,6 @@ msg += f"{name}\nКлиент: {client}\n\n"
 await update.message.reply_text(msg)
 except Exception as e:
 await update.message.reply_text(f"Ошибка: {e}")
-
-# === ЗАПУСК ===
 
 def main():
 app = Application.builder().token(TELEGRAM_TOKEN).build()
