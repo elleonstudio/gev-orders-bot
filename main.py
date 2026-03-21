@@ -7,11 +7,14 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 NOTION_TOKEN = os.getenv('NOTION_TOKEN')
 NOTION_DATABASE_ID = os.getenv('NOTION_DATABASE_ID')
 PACKAGES_DATABASE_ID = "32a8c4d1fb0e806ebb98f5995704d0e5"
+
+logger.info(f"DB ID: {NOTION_DATABASE_ID}")
 
 notion = Client(auth=NOTION_TOKEN)
 
@@ -23,7 +26,7 @@ TARIFFS = {
     "Екатеринбург": 1400, "Екатеринбург (6-10)": 1200,
 }
 
-# 22 состояния - явные числа, без range()
+# 21 состояние
 INVOICE = 0
 PRODUCT_NAME = 1
 QUANTITY = 2
@@ -89,7 +92,7 @@ async def get_packages_from_notion():
         packages_cache = packages
         return packages
     except Exception as e:
-        logging.error(f"Error fetching packages: {e}")
+        logger.error(f"Error fetching packages: {e}")
         return []
 
 def find_best_package(packages, item_length, item_width, item_height):
@@ -108,61 +111,90 @@ def find_best_package(packages, item_length, item_width, item_height):
     return best_pkg
 
 async def get_client_orders(client_name):
+    """Получить последние заказы клиента из Notion"""
     try:
+        logger.info(f"Fetching orders for client: {client_name}")
+        logger.info(f"Using database_id: {NOTION_DATABASE_ID}")
+        
+        # Проверим, что database_id не пустой
+        if not NOTION_DATABASE_ID:
+            logger.error("NOTION_DATABASE_ID is empty!")
+            return []
+            
         res = notion.databases.query(
             database_id=NOTION_DATABASE_ID,
             filter={"property": "Клиент", "select": {"equals": client_name}},
             sorts=[{"timestamp": "created_time", "direction": "descending"}],
             page_size=5
         )
+        logger.info(f"Found {len(res.get('results', []))} orders")
         return res.get('results', [])
-    except:
+    except Exception as e:
+        logger.error(f"Error in get_client_orders: {e}")
+        # Вернем пустой список при любой ошибке
         return []
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         'Привет! Бот для заказов GS.\n\n'
         '/zakaz [имя] — новый заказ\n'
-        '/nayti [текст] — найти заказ\n'
         '/cancel — отменить'
     )
 
 async def zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    parts = text.split(maxsplit=1)
-    if len(parts) < 2:
-        await update.message.reply_text('Укажи имя: /zakaz Армен')
+    try:
+        text = update.message.text
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await update.message.reply_text('Укажи имя: /zakaz Армен')
+            return ConversationHandler.END
+        
+        name = parts[1].strip()
+        uid = update.effective_user.id
+        
+        logger.info(f"Starting order for {name}, uid={uid}")
+        
+        # Инициализируем заказ ДО получения истории
+        orders[uid] = {'client': name, 'items': [], 'current': {}, 'invoice': False, 'need_ff': True}
+        
+        # Получаем историю
+        history = await get_client_orders(name)
+        
+        if history:
+            keyboard = []
+            for order in history[:3]:
+                props = order['properties']
+                product = props.get('Описание товара', {}).get('rich_text', [{}])[0].get('text', {}).get('content', 'Товар')
+                qty = props.get('Количество', {}).get('number', 0)
+                date = order.get('created_time', '')[:10]
+                keyboard.append([InlineKeyboardButton(f"🔄 {product} ×{int(qty)} ({date})", callback_data=f'repeat_{order["id"]}')])
+            keyboard.append([InlineKeyboardButton("✏️ Новый товар", callback_data='new_product')])
+            await update.message.reply_text(f'Заказ для: {name}\n\nНайдены предыдущие заказы:', reply_markup=InlineKeyboardMarkup(keyboard))
+            return INVOICE
+        else:
+            await update.message.reply_text(f'Заказ для: {name}\n\nНазвание товара:')
+            return PRODUCT_NAME
+            
+    except Exception as e:
+        logger.error(f"Error in zakaz: {e}")
+        await update.message.reply_text(f'Ошибка: {str(e)[:200]}. Попробуй еще раз.')
         return ConversationHandler.END
-    name = parts[1].strip()
-    uid = update.effective_user.id
-    history = await get_client_orders(name)
-    if history:
-        keyboard = []
-        for order in history[:3]:
-            props = order['properties']
-            product = props.get('Описание товара', {}).get('rich_text', [{}])[0].get('text', {}).get('content', 'Товар')
-            qty = props.get('Количество', {}).get('number', 0)
-            date = order.get('created_time', '')[:10]
-            keyboard.append([InlineKeyboardButton(f"🔄 {product} ×{int(qty)} ({date})", callback_data=f'repeat_{order["id"]}')])
-        keyboard.append([InlineKeyboardButton("✏️ Новый товар", callback_data='new_product')])
-        await update.message.reply_text(f'Заказ для: {name}\n\nНайдены предыдущие заказы:', reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await update.message.reply_text(f'Заказ для: {name}\n\nНазвание товара:')
-    orders[uid] = {'client': name, 'items': [], 'current': {}, 'invoice': False, 'need_ff': True}
-    return INVOICE if not history else PRODUCT_NAME
 
 async def repeat_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = update.effective_user.id
     data = query.data
-    if data == 'new_product':
-        await query.edit_message_text('Название товара:')
-        return PRODUCT_NAME
-    order_id = data.replace('repeat_', '')
+    
     try:
+        if data == 'new_product':
+            await query.edit_message_text('Название товара:')
+            return PRODUCT_NAME
+            
+        order_id = data.replace('repeat_', '')
         order = notion.pages.retrieve(page_id=order_id)
         props = order['properties']
+        
         orders[uid]['current'] = {
             'name': props.get('Описание товара', {}).get('rich_text', [{}])[0].get('text', {}).get('content', ''),
             'qty': props.get('Количество', {}).get('number', 0),
@@ -171,6 +203,7 @@ async def repeat_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'delivery_factory': props.get('Доставка (CNY)', {}).get('number', 0),
             'dimensions': props.get('Размеры (Д×Ш×В)', {}).get('rich_text', [{}])[0].get('text', {}).get('content', ''),
         }
+        
         c = orders[uid]['current']
         await query.edit_message_text(
             f'Повторить заказ:\n📦 {c["name"]} × {int(c["qty"])}\n💰 Цена клиенту: {fmt(c["price"])} ¥\n🏭 Закупка: {fmt(c["purchase"])} ¥\n📐 Размеры: {c["dimensions"]}\n\nВсё верно?',
@@ -181,7 +214,8 @@ async def repeat_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
         return INVOICE
-    except:
+    except Exception as e:
+        logger.error(f"Error in repeat_order_cb: {e}")
         await query.edit_message_text('Ошибка загрузки заказа. Название товара:')
         return PRODUCT_NAME
 
@@ -202,21 +236,39 @@ async def invoice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = update.effective_user.id
+    
     if query.data == 'inv_yes':
         orders[uid]['invoice'] = True
     else:
         orders[uid]['invoice'] = False
+    
     if orders[uid]['current'].get('name'):
         await query.edit_message_text('Введи размеры 1 шт (Д Ш В в см, через пробел):\nНапример: 15 10 8')
         return DIMENSIONS
+    
     await query.edit_message_text('Название товара:')
     return PRODUCT_NAME
 
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    orders[uid]['current']['name'] = update.message.text
-    await update.message.reply_text('Количество:')
-    return QUANTITY
+    try:
+        uid = update.effective_user.id
+        text = update.message.text.strip()
+        logger.info(f"get_name called with: {text}, uid={uid}")
+        
+        if uid not in orders:
+            logger.error(f"No order found for uid {uid}")
+            await update.message.reply_text('Ошибка: начни сначала с /zakaz')
+            return ConversationHandler.END
+            
+        orders[uid]['current']['name'] = text
+        logger.info(f"Saved name: {text}")
+        
+        await update.message.reply_text('Количество:')
+        return QUANTITY
+    except Exception as e:
+        logger.error(f"Error in get_name: {e}")
+        await update.message.reply_text(f'Ошибка: {str(e)[:200]}')
+        return ConversationHandler.END
 
 async def get_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -503,115 +555,118 @@ async def crating_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def calculate_and_show_result(update, context):
-    uid = update.effective_user.id if hasattr(update, 'effective_user') else update.callback_query.from_user.id
-    items = orders[uid]['items']
-    client = orders[uid]['client']
-    client_rate = orders[uid]['client_rate']
-    real_rate = orders[uid]['real_rate']
-    rub_rate = orders[uid]['rub_rate']
-    invoice = orders[uid]['invoice']
-    need_ff = orders[uid].get('need_ff', True)
-    order_code = get_code(client)
-    total_qty = sum(i['qty'] for i in items)
-    total_boxes = orders[uid].get('total_boxes', sum(i.get('boxes', 1) for i in items))
-    total_yuan = sum(i['price'] * i['qty'] for i in items)
-    total_purchase_yuan = sum(i['purchase'] * i['qty'] for i in items)
-    delivery_factory_yuan = sum(i.get('delivery_factory', 0) for i in items)
-    total_packages_yuan = sum(i.get('package_total', 0) for i in items)
-    if need_ff:
-        ff_pickup = orders[uid].get('ff_pickup', 0)
-        ff_boxes = orders[uid].get('ff_boxes', 0)
-        ff_stickers = orders[uid].get('ff_stickers', 0)
-        ff_thermal_paper = orders[uid].get('ff_thermal_paper', 0)
-        ff_work = orders[uid].get('ff_work', 0)
-        ff_total_yuan = ff_pickup + ff_boxes + total_packages_yuan + ff_stickers + ff_thermal_paper + ff_work
-    else:
-        ff_pickup = ff_boxes = ff_stickers = ff_thermal_paper = ff_work = 0
-        ff_total_yuan = 0
-    ff_total_amd = int(ff_total_yuan * real_rate)
-    fillx_pickup = 7000
-    fillx_crating = orders[uid].get('fillx_crating', 0)
-    fillx_receiving = 1000 * total_boxes
-    fillx_delivery = orders[uid].get('fillx_delivery', 0)
-    fillx_unpacking = 500 * total_boxes
-    fillx_total_rub = fillx_pickup + fillx_crating + fillx_receiving + fillx_delivery + fillx_unpacking
-    fillx_total_amd = int(fillx_total_rub * rub_rate)
-    client_total_yuan = total_yuan + ff_total_yuan
-    client_total_amd = int(client_total_yuan * client_rate)
-    purchase_amd = int((total_purchase_yuan + delivery_factory_yuan) * real_rate)
-    total_costs_amd = purchase_amd + ff_total_amd + fillx_total_amd
-    profit_amd = client_total_amd - total_costs_amd
-    client_msg = f"{order_code}\n\n"
-    for i in items:
-        client_msg += f"• {i['name']} × {int(i['qty'])}\n"
-    client_msg += f"\nТовары: {fmt(total_yuan)} ¥\n"
-    if need_ff:
-        client_msg += f"Фулфилмент: {fmt(ff_total_yuan)} ¥\n"
-    client_msg += f"━━━━━━━━━━━━\nИТОГО ¥: {fmt(client_total_yuan)}\nК ОПЛАТЕ: {client_total_amd} AMD"
-    my_msg = f"📊 {order_code}\n\n─── ЗАКУПКА ───\nТовар: {fmt(total_purchase_yuan)}¥ = {purchase_amd} AMD\nДоставка: {fmt(delivery_factory_yuan)}¥\n\n"
-    if need_ff:
-        my_msg += f"─── FF КИТАЙ ({fmt(ff_total_yuan)}¥) ───\nЗабор: {fmt(ff_pickup)}¥\nКоробки: {fmt(ff_boxes)}¥\nПакеты: {fmt(total_packages_yuan)}¥\nНаклейки: {fmt(ff_stickers)}¥\nТермобумага: {fmt(ff_thermal_paper)}¥\nРабота: {fmt(ff_work)}¥\nИтого FF: {ff_total_amd} AMD\n\n"
-    my_msg += f"─── FILLX ({fillx_total_rub}₽) ───\nЗабор: 7000₽\nОбрешётка: {fillx_crating}₽\nПриёмка: {fillx_receiving}₽\nДоставка: {fillx_delivery}₽\nРазбор: {fillx_unpacking}₽\nИтого: {fillx_total_amd} AMD\n\n─── ИТОГО ───\nВыручка: {client_total_amd} AMD\nРасходы: {total_costs_amd} AMD\n💰 ПРИБЫЛЬ: {profit_amd} AMD"
-    if hasattr(update, 'callback_query'):
-        chat_id = update.callback_query.message.chat_id
-        await context.bot.send_message(chat_id=chat_id, text=client_msg)
-        await context.bot.send_message(chat_id=chat_id, text=my_msg)
-    else:
-        await update.message.reply_text(client_msg)
-        await update.message.reply_text(my_msg)
     try:
-        items_description = "; ".join([f"{i['name']} (x{int(i['qty'])})" for i in items])
-        dimensions_str = items[0].get('dimensions', '')
-        notion.pages.create(
-            parent={"database_id": NOTION_DATABASE_ID},
-            properties={
-                "Код заказа": {"title": [{"text": {"content": order_code}}]},
-                "Описание товара": {"rich_text": [{"text": {"content": items_description}}]},
-                "Количество": {"number": int(total_qty)},
-                "Размеры (Д×Ш×В)": {"rich_text": [{"text": {"content": dimensions_str}}]},
-                "Цена клиенту (CNY)": {"number": float(items[0]['price'])},
-                "Цена закупки (CNY)": {"number": float(items[0]['purchase'])},
-                "Доставка (CNY)": {"number": float(delivery_factory_yuan)},
-                "ИТОГО (CNY)": {"number": float(total_yuan)},
-                "На закупку (CNY)": {"number": float(total_purchase_yuan)},
-                "Курс клиенту": {"number": float(client_rate)},
-                "Курс реальный": {"number": float(real_rate)},
-                "Курс ₽→драм": {"number": float(rub_rate)},
-                "Закупка реальная (AMD)": {"number": purchase_amd},
-                " К ОПЛАТЕ (AMD)": {"number": client_total_amd},
-                "Прибыль (AMD)": {"number": profit_amd},
-                "Клиент": {"select": {"name": client}},
-                "Склад РФ": {"select": {"name": orders[uid].get('warehouse', 'Москва')}},
-                "FF Забор груза": {"number": ff_pickup},
-                "FF Коробки": {"number": ff_boxes},
-                "FF Пакеты": {"number": total_packages_yuan},
-                "FF Термонаклейки": {"number": ff_stickers},
-                "FF Термобумага": {"number": ff_thermal_paper},
-                "FF Работа": {"number": ff_work},
-                "FF Итого (CNY)": {"number": ff_total_yuan},
-                "FF Итого (AMD)": {"number": ff_total_amd},
-                "FILLX Забор IOB": {"number": 7000},
-                "FILLX Обрешётка": {"number": fillx_crating},
-                "FILLX Приёмка": {"number": fillx_receiving},
-                "FILLX Доставка": {"number": fillx_delivery},
-                "FILLX Разбор": {"number": fillx_unpacking},
-                "FILLX Итого (₽)": {"number": fillx_total_rub},
-                "FILLX Итого (AMD)": {"number": fillx_total_amd},
-                " Инвойс": {"select": {"name": "Да" if invoice else "Нет"}},
-                "Статус": {"select": {"name": "Новый"}},
-            }
-        )
-        if hasattr(update, 'callback_query'):
-            await context.bot.send_message(chat_id=update.callback_query.message.chat_id, text="✅ Сохранено в Notion")
+        uid = update.effective_user.id if hasattr(update, 'effective_user') else update.callback_query.from_user.id
+        items = orders[uid]['items']
+        client = orders[uid]['client']
+        client_rate = orders[uid]['client_rate']
+        real_rate = orders[uid]['real_rate']
+        rub_rate = orders[uid]['rub_rate']
+        invoice = orders[uid]['invoice']
+        need_ff = orders[uid].get('need_ff', True)
+        order_code = get_code(client)
+        total_qty = sum(i['qty'] for i in items)
+        total_boxes = orders[uid].get('total_boxes', sum(i.get('boxes', 1) for i in items))
+        total_yuan = sum(i['price'] * i['qty'] for i in items)
+        total_purchase_yuan = sum(i['purchase'] * i['qty'] for i in items)
+        delivery_factory_yuan = sum(i.get('delivery_factory', 0) for i in items)
+        total_packages_yuan = sum(i.get('package_total', 0) for i in items)
+        if need_ff:
+            ff_pickup = orders[uid].get('ff_pickup', 0)
+            ff_boxes = orders[uid].get('ff_boxes', 0)
+            ff_stickers = orders[uid].get('ff_stickers', 0)
+            ff_thermal_paper = orders[uid].get('ff_thermal_paper', 0)
+            ff_work = orders[uid].get('ff_work', 0)
+            ff_total_yuan = ff_pickup + ff_boxes + total_packages_yuan + ff_stickers + ff_thermal_paper + ff_work
         else:
-            await update.message.reply_text("✅ Сохранено в Notion")
+            ff_pickup = ff_boxes = ff_stickers = ff_thermal_paper = ff_work = 0
+            ff_total_yuan = 0
+        ff_total_amd = int(ff_total_yuan * real_rate)
+        fillx_pickup = 7000
+        fillx_crating = orders[uid].get('fillx_crating', 0)
+        fillx_receiving = 1000 * total_boxes
+        fillx_delivery = orders[uid].get('fillx_delivery', 0)
+        fillx_unpacking = 500 * total_boxes
+        fillx_total_rub = fillx_pickup + fillx_crating + fillx_receiving + fillx_delivery + fillx_unpacking
+        fillx_total_amd = int(fillx_total_rub * rub_rate)
+        client_total_yuan = total_yuan + ff_total_yuan
+        client_total_amd = int(client_total_yuan * client_rate)
+        purchase_amd = int((total_purchase_yuan + delivery_factory_yuan) * real_rate)
+        total_costs_amd = purchase_amd + ff_total_amd + fillx_total_amd
+        profit_amd = client_total_amd - total_costs_amd
+        client_msg = f"{order_code}\n\n"
+        for i in items:
+            client_msg += f"• {i['name']} × {int(i['qty'])}\n"
+        client_msg += f"\nТовары: {fmt(total_yuan)} ¥\n"
+        if need_ff:
+            client_msg += f"Фулфилмент: {fmt(ff_total_yuan)} ¥\n"
+        client_msg += f"━━━━━━━━━━━━\nИТОГО ¥: {fmt(client_total_yuan)}\nК ОПЛАТЕ: {client_total_amd} AMD"
+        my_msg = f"📊 {order_code}\n\n─── ЗАКУПКА ───\nТовар: {fmt(total_purchase_yuan)}¥ = {purchase_amd} AMD\nДоставка: {fmt(delivery_factory_yuan)}¥\n\n"
+        if need_ff:
+            my_msg += f"─── FF КИТАЙ ({fmt(ff_total_yuan)}¥) ───\nЗабор: {fmt(ff_pickup)}¥\nКоробки: {fmt(ff_boxes)}¥\nПакеты: {fmt(total_packages_yuan)}¥\nНаклейки: {fmt(ff_stickers)}¥\nТермобумага: {fmt(ff_thermal_paper)}¥\nРабота: {fmt(ff_work)}¥\nИтого FF: {ff_total_amd} AMD\n\n"
+        my_msg += f"─── FILLX ({fillx_total_rub}₽) ───\nЗабор: 7000₽\nОбрешётка: {fillx_crating}₽\nПриёмка: {fillx_receiving}₽\nДоставка: {fillx_delivery}₽\nРазбор: {fillx_unpacking}₽\nИтого: {fillx_total_amd} AMD\n\n─── ИТОГО ───\nВыручка: {client_total_amd} AMD\nРасходы: {total_costs_amd} AMD\n💰 ПРИБЫЛЬ: {profit_amd} AMD"
+        if hasattr(update, 'callback_query'):
+            chat_id = update.callback_query.message.chat_id
+            await context.bot.send_message(chat_id=chat_id, text=client_msg)
+            await context.bot.send_message(chat_id=chat_id, text=my_msg)
+        else:
+            await update.message.reply_text(client_msg)
+            await update.message.reply_text(my_msg)
+        try:
+            items_description = "; ".join([f"{i['name']} (x{int(i['qty'])})" for i in items])
+            dimensions_str = items[0].get('dimensions', '')
+            notion.pages.create(
+                parent={"database_id": NOTION_DATABASE_ID},
+                properties={
+                    "Код заказа": {"title": [{"text": {"content": order_code}}]},
+                    "Описание товара": {"rich_text": [{"text": {"content": items_description}}]},
+                    "Количество": {"number": int(total_qty)},
+                    "Размеры (Д×Ш×В)": {"rich_text": [{"text": {"content": dimensions_str}}]},
+                    "Цена клиенту (CNY)": {"number": float(items[0]['price'])},
+                    "Цена закупки (CNY)": {"number": float(items[0]['purchase'])},
+                    "Доставка (CNY)": {"number": float(delivery_factory_yuan)},
+                    "ИТОГО (CNY)": {"number": float(total_yuan)},
+                    "На закупку (CNY)": {"number": float(total_purchase_yuan)},
+                    "Курс клиенту": {"number": float(client_rate)},
+                    "Курс реальный": {"number": float(real_rate)},
+                    "Курс ₽→драм": {"number": float(rub_rate)},
+                    "Закупка реальная (AMD)": {"number": purchase_amd},
+                    " К ОПЛАТЕ (AMD)": {"number": client_total_amd},
+                    "Прибыль (AMD)": {"number": profit_amd},
+                    "Клиент": {"select": {"name": client}},
+                    "Склад РФ": {"select": {"name": orders[uid].get('warehouse', 'Москва')}},
+                    "FF Забор груза": {"number": ff_pickup},
+                    "FF Коробки": {"number": ff_boxes},
+                    "FF Пакеты": {"number": total_packages_yuan},
+                    "FF Термонаклейки": {"number": ff_stickers},
+                    "FF Термобумага": {"number": ff_thermal_paper},
+                    "FF Работа": {"number": ff_work},
+                    "FF Итого (CNY)": {"number": ff_total_yuan},
+                    "FF Итого (AMD)": {"number": ff_total_amd},
+                    "FILLX Забор IOB": {"number": 7000},
+                    "FILLX Обрешётка": {"number": fillx_crating},
+                    "FILLX Приёмка": {"number": fillx_receiving},
+                    "FILLX Доставка": {"number": fillx_delivery},
+                    "FILLX Разбор": {"number": fillx_unpacking},
+                    "FILLX Итого (₽)": {"number": fillx_total_rub},
+                    "FILLX Итого (AMD)": {"number": fillx_total_amd},
+                    " Инвойс": {"select": {"name": "Да" if invoice else "Нет"}},
+                    "Статус": {"select": {"name": "Новый"}},
+                }
+            )
+            if hasattr(update, 'callback_query'):
+                await context.bot.send_message(chat_id=update.callback_query.message.chat_id, text="✅ Сохранено в Notion")
+            else:
+                await update.message.reply_text("✅ Сохранено в Notion")
+        except Exception as e:
+            logger.error(f"Notion error: {e}")
+            if hasattr(update, 'callback_query'):
+                await context.bot.send_message(chat_id=update.callback_query.message.chat_id, text=f"❌ Ошибка сохранения: {str(e)[:200]}")
+            else:
+                await update.message.reply_text(f"❌ Ошибка сохранения: {str(e)[:200]}")
+        del orders[uid]
     except Exception as e:
-        logging.error(f"Notion error: {e}")
-        if hasattr(update, 'callback_query'):
-            await context.bot.send_message(chat_id=update.callback_query.message.chat_id, text=f"❌ Ошибка: {str(e)[:200]}")
-        else:
-            await update.message.reply_text(f"❌ Ошибка: {str(e)[:200]}")
-    del orders[uid]
+        logger.error(f"Error in calculate_and_show_result: {e}")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -658,6 +713,7 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)],
     )
     app.add_handler(conv)
+    logger.info("Bot starting...")
     app.run_polling()
 
 if __name__ == '__main__':
