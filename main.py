@@ -282,12 +282,15 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
     else:
         await update.message.reply_text(my_msg)
     
-    # === NOTION с ИСПРАВЛЕННЫМИ названиями (с пробелами) ===
+    # === NOTION ===
     try:
         items_description = "; ".join([f"{i['name']} (x{int(i['qty'])})" for i in items])
         
         notion_properties = {
-            # Свойства БЕЗ пробелов в начале
+            # Title property - КОД ЗАКАЗА
+            "Код заказа": {"title": [{"text": {"content": order_code}}]},
+            
+            # Остальные свойства
             "Описание товара": {"rich_text": [{"text": {"content": items_description}}]},
             "Количество": {"number": int(total_qty)},
             "Цена клиенту (CNY)": {"number": float(items[0]['price'])},
@@ -304,15 +307,14 @@ async def show_result(update, context, total_yuan, final_dram, commission_text, 
             "Клиент": {"select": {"name": client}},
             "Статус": {"select": {"name": "Поиск — жду цену"}},
             "С комиссией (CNY)": {"number": float(final_dram / client_rate) if client_rate > 0 else 0},
-            "Фикс комиссия": {"number": int(fixed_amount)} if fixed_amount > 0 else None,
-            # Свойства С ПРОБЕЛАМИ в начале
+            # Свойства с пробелами в начале
             " Комиссия": {"number": float(commission_pct)},
             " К ОПЛАТЕ (AMD)": {"number": int(final_dram)},
             " Инвойс": {"select": {"name": "Да" if invoice else "Нет"}},
         }
         
-        # Удаляем None значения
-        notion_properties = {k: v for k, v in notion_properties.items() if v is not None}
+        if fixed_amount > 0:
+            notion_properties["Фикс комиссия"] = {"number": int(fixed_amount)}
         
         notion.pages.create(
             parent={"database_id": NOTION_DATABASE_ID},
