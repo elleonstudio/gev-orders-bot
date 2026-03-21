@@ -23,12 +23,28 @@ TARIFFS = {
     "Екатеринбург": 1400, "Екатеринбург (6-10)": 1200,
 }
 
-# 22 состояния
-(INVOICE, PRODUCT_NAME, QUANTITY, PRICE, PURCHASE, DELIVERY_FACTORY,
- DIMENSIONS, PACKAGE_SELECT, MORE, NEED_FF,
- CLIENT_RATE, REAL_RATE, RUB_RATE,
- FF_PICKUP, FF_BOX_PRICE, FF_STICKER_PRICE, THERMAL_PAPER_QTY, FF_WORK_PRICE,
- WAREHOUSE, BOX_COUNT, CRATING) = range(22)
+# 22 состояния - явные числа, без range()
+INVOICE = 0
+PRODUCT_NAME = 1
+QUANTITY = 2
+PRICE = 3
+PURCHASE = 4
+DELIVERY_FACTORY = 5
+DIMENSIONS = 6
+PACKAGE_SELECT = 7
+MORE = 8
+NEED_FF = 9
+CLIENT_RATE = 10
+REAL_RATE = 11
+RUB_RATE = 12
+FF_PICKUP = 13
+FF_BOX_PRICE = 14
+FF_STICKER_PRICE = 15
+THERMAL_PAPER_QTY = 16
+FF_WORK_PRICE = 17
+WAREHOUSE = 18
+BOX_COUNT = 19
+CRATING = 20
 
 orders = {}
 packages_cache = None
@@ -456,7 +472,7 @@ async def warehouse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         city = "Екатеринбург (6-10)"
     price_per_box = TARIFFS.get(city, 1000)
     orders[uid]['fillx_delivery'] = price_per_box * boxes
-    await query.edit_message_text(f'{city}: {price_per_box}₽ × {boxes} короб = {price_per_box * boxes}₽\n\nСколько коробок всего?', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"{boxes} короб", callback_data=f'box_{boxes}')]]))
+    await query.edit_message_text(f'{city}: {price_per_box}₽ × {boxes} короб = {price_per_box * boxes}₽\n\nСколько коробок всего?')
     return BOX_COUNT
 
 async def get_box_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
