@@ -26,7 +26,7 @@ TARIFFS = {
     "Екатеринбург": 1400, "Екатеринбург (6-10)": 1200,
 }
 
-# 21 состояние
+# 22 состояния (добавлено PACKAGE_PRICE_MANUAL)
 INVOICE = 0
 PRODUCT_NAME = 1
 QUANTITY = 2
@@ -35,6 +35,7 @@ PURCHASE = 4
 DELIVERY_FACTORY = 5
 DIMENSIONS = 6
 PACKAGE_SELECT = 7
+PACKAGE_PRICE_MANUAL = 21  # НОВОЕ: ввод цены пакета вручную
 MORE = 8
 NEED_FF = 9
 CLIENT_RATE = 10
@@ -111,16 +112,11 @@ def find_best_package(packages, item_length, item_width, item_height):
     return best_pkg
 
 async def get_client_orders(client_name):
-    """Получить последние заказы клиента из Notion"""
     try:
         logger.info(f"Fetching orders for client: {client_name}")
-        logger.info(f"Using database_id: {NOTION_DATABASE_ID}")
-        
-        # Проверим, что database_id не пустой
         if not NOTION_DATABASE_ID:
             logger.error("NOTION_DATABASE_ID is empty!")
             return []
-            
         res = notion.databases.query(
             database_id=NOTION_DATABASE_ID,
             filter={"property": "Клиент", "select": {"equals": client_name}},
@@ -131,7 +127,6 @@ async def get_client_orders(client_name):
         return res.get('results', [])
     except Exception as e:
         logger.error(f"Error in get_client_orders: {e}")
-        # Вернем пустой список при любой ошибке
         return []
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,18 +143,11 @@ async def zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(parts) < 2:
             await update.message.reply_text('Укажи имя: /zakaz Армен')
             return ConversationHandler.END
-        
         name = parts[1].strip()
         uid = update.effective_user.id
-        
         logger.info(f"Starting order for {name}, uid={uid}")
-        
-        # Инициализируем заказ ДО получения истории
         orders[uid] = {'client': name, 'items': [], 'current': {}, 'invoice': False, 'need_ff': True}
-        
-        # Получаем историю
         history = await get_client_orders(name)
-        
         if history:
             keyboard = []
             for order in history[:3]:
@@ -174,7 +162,6 @@ async def zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f'Заказ для: {name}\n\nНазвание товара:')
             return PRODUCT_NAME
-            
     except Exception as e:
         logger.error(f"Error in zakaz: {e}")
         await update.message.reply_text(f'Ошибка: {str(e)[:200]}. Попробуй еще раз.')
@@ -185,16 +172,13 @@ async def repeat_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid = update.effective_user.id
     data = query.data
-    
     try:
         if data == 'new_product':
             await query.edit_message_text('Название товара:')
             return PRODUCT_NAME
-            
         order_id = data.replace('repeat_', '')
         order = notion.pages.retrieve(page_id=order_id)
         props = order['properties']
-        
         orders[uid]['current'] = {
             'name': props.get('Описание товара', {}).get('rich_text', [{}])[0].get('text', {}).get('content', ''),
             'qty': props.get('Количество', {}).get('number', 0),
@@ -203,7 +187,6 @@ async def repeat_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'delivery_factory': props.get('Доставка (CNY)', {}).get('number', 0),
             'dimensions': props.get('Размеры (Д×Ш×В)', {}).get('rich_text', [{}])[0].get('text', {}).get('content', ''),
         }
-        
         c = orders[uid]['current']
         await query.edit_message_text(
             f'Повторить заказ:\n📦 {c["name"]} × {int(c["qty"])}\n💰 Цена клиенту: {fmt(c["price"])} ¥\n🏭 Закупка: {fmt(c["purchase"])} ¥\n📐 Размеры: {c["dimensions"]}\n\nВсё верно?',
@@ -236,16 +219,13 @@ async def invoice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = update.effective_user.id
-    
     if query.data == 'inv_yes':
         orders[uid]['invoice'] = True
     else:
         orders[uid]['invoice'] = False
-    
     if orders[uid]['current'].get('name'):
         await query.edit_message_text('Введи размеры 1 шт (Д Ш В в см, через пробел):\nНапример: 15 10 8')
         return DIMENSIONS
-    
     await query.edit_message_text('Название товара:')
     return PRODUCT_NAME
 
@@ -254,15 +234,12 @@ async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = update.effective_user.id
         text = update.message.text.strip()
         logger.info(f"get_name called with: {text}, uid={uid}")
-        
         if uid not in orders:
             logger.error(f"No order found for uid {uid}")
             await update.message.reply_text('Ошибка: начни сначала с /zakaz')
             return ConversationHandler.END
-            
         orders[uid]['current']['name'] = text
         logger.info(f"Saved name: {text}")
-        
         await update.message.reply_text('Количество:')
         return QUANTITY
     except Exception as e:
@@ -340,13 +317,34 @@ async def get_dimensions(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return PACKAGE_SELECT
         else:
-            await update.message.reply_text(f'📐 Размеры: {int(l)}×{int(w)}×{int(h)} см\n📦 В короб влезет: ~{items_per_box} шт\n📦 Коробок: {boxes}\n\n⚠️ Пакет не найден. Введи цену (¥):')
+            # Пакет не найден - спрашиваем цену вручную
+            await update.message.reply_text(f'📐 Размеры: {int(l)}×{int(w)}×{int(h)} см\n📦 В короб влезет: ~{items_per_box} шт\n📦 Коробок: {boxes}\n\n⚠️ Пакет не найден. Введи цену пакетов (¥):')
             orders[uid]['current']['package'] = None
-            orders[uid]['current']['package_price'] = 0
-            return FF_STICKER_PRICE
+            return PACKAGE_PRICE_MANUAL  # Используем правильное состояние!
     except:
         await update.message.reply_text('Неверный формат. Введи 3 числа:\n15 10 8')
         return DIMENSIONS
+
+# НОВАЯ ФУНКЦИЯ: обработка ввода цены пакета вручную
+async def get_package_price_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    try:
+        price = float(update.message.text)
+        qty = orders[uid]['current']['qty']
+        pkg_total = price * qty
+        orders[uid]['current']['package'] = {'name': 'Пакет (ручной ввод)', 'price': price}
+        orders[uid]['current']['package_price'] = price
+        orders[uid]['current']['package_total'] = pkg_total
+        
+        keyboard = [[InlineKeyboardButton("Да", callback_data='more_yes'), InlineKeyboardButton("Нет", callback_data='more_no')]]
+        await update.message.reply_text(
+            f'💰 Цена пакетов: {price} ¥ × {qty} = {fmt(pkg_total)} ¥\n\nЕщё товар?',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return MORE
+    except:
+        await update.message.reply_text('Число! Введи цену пакетов (¥):')
+        return PACKAGE_PRICE_MANUAL
 
 async def package_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -367,7 +365,7 @@ async def package_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return PACKAGE_SELECT
     elif data == 'pkg_custom':
         await query.edit_message_text('Введи цену пакетов (¥):')
-        return FF_STICKER_PRICE
+        return PACKAGE_PRICE_MANUAL  # Теперь используем правильное состояние
     elif data.startswith('pkg_'):
         pkg_id = data.replace('pkg_', '')
         packages = await get_packages_from_notion()
@@ -696,6 +694,7 @@ def main():
             DELIVERY_FACTORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_delivery_factory)],
             DIMENSIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_dimensions)],
             PACKAGE_SELECT: [CallbackQueryHandler(package_select_cb, pattern='^(pkg_ok|pkg_select|pkg_custom|pkg_)')],
+            PACKAGE_PRICE_MANUAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_package_price_manual)],  # НОВОЕ
             MORE: [CallbackQueryHandler(more_cb, pattern='^more_')],
             NEED_FF: [CallbackQueryHandler(need_ff_cb, pattern='^ff_')],
             CLIENT_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_rate)],
