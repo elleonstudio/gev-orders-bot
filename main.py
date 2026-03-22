@@ -1234,6 +1234,17 @@ async def f_thermal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"Для доставки РФ используй <b>/dostavka</b>"
         
         await update.message.reply_text(msg, parse_mode='HTML')
+        
+        # === АВТО-СОХРАНЕНИЕ В NOTION ===
+        has_access, _ = await check_notion_access()
+        if has_access:
+            try:
+                notion_url = await save_to_notion(update, context, uid)
+                if notion_url:
+                    await update.message.reply_text(f"✅ Сохранено в Notion:\n{notion_url}", parse_mode='HTML')
+            except Exception as e:
+                logger.error(f"Ошибка сохранения FF в Notion: {e}")
+        
         save_session()
         return ConversationHandler.END
     except:
@@ -1407,7 +1418,8 @@ async def d_crating_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wh_text = "\n".join([f"📦 {w['city']}: {w['tariff']}₽ × {w['boxes']} = {w['cost']}₽" 
                             for w in orders[uid]['warehouses']])
         
-        msg = f"📦 <b>FILLX Доставка РФ</b>\n\n"
+        msg = f"📦 <b>FILLX Доставка РФ</b>\n"
+        msg += f"Курс: {rub_rate} ₽→драм\n\n"
         msg += f"{wh_text}\n\n"
         msg += f"Забор IOB: 7000₽\n"
         msg += f"Обрешётка: {crating}₽\n"
@@ -1425,7 +1437,21 @@ async def d_crating_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Сохраняем только если Notion доступен
         has_access, _ = await check_notion_access()
         if has_access:
-            await save_to_notion(update, context, uid)
+            try:
+                notion_url = await save_to_notion(update, context, uid)
+                if notion_url:
+                    await context.bot.send_message(
+                        chat_id=update.callback_query.message.chat_id,
+                        text=f"✅ Сохранено в Notion:\n{notion_url}",
+                        parse_mode='HTML'
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка сохранения FILLX в Notion: {e}")
+                await context.bot.send_message(
+                    chat_id=update.callback_query.message.chat_id,
+                    text=f"⚠️ Ошибка сохранения: {str(e)[:100]}",
+                    parse_mode='HTML'
+                )
         else:
             await context.bot.send_message(
                 chat_id=update.callback_query.message.chat_id,
