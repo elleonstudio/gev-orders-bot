@@ -2,6 +2,7 @@ import os
 import logging
 import math
 import json
+import traceback
 from datetime import datetime
 from notion_client import Client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,7 +16,20 @@ NOTION_TOKEN = os.getenv('NOTION_TOKEN')
 NOTION_DATABASE_ID = os.getenv('NOTION_DATABASE_ID')
 PACKAGES_DATABASE_ID = "32a8c4d1fb0e806ebb98f5995704d0e5"
 
-notion = Client(auth=NOTION_TOKEN)
+# Проверяем наличие токенов
+if not TELEGRAM_TOKEN:
+    logger.error("❌ TELEGRAM_BOT_TOKEN не найден!")
+if not NOTION_TOKEN:
+    logger.error("❌ NOTION_TOKEN не найден!")
+if not NOTION_DATABASE_ID:
+    logger.error("❌ NOTION_DATABASE_ID не найден!")
+
+try:
+    notion = Client(auth=NOTION_TOKEN)
+    logger.info("✅ Notion клиент создан")
+except Exception as e:
+    logger.error(f"❌ Ошибка создания Notion клиента: {e}")
+    notion = None
 
 TARIFFS = {
     "Москва": 350, "Электросталь": 350, "Коледино": 350, "Тула": 500,
@@ -53,8 +67,8 @@ def save_session():
     try:
         with open(sessions_file, 'w') as f:
             json.dump(orders, f, default=str)
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Ошибка сохранения сессии: {e}")
 
 def load_session():
     try:
@@ -63,7 +77,24 @@ def load_session():
     except:
         return {}
 
+async def check_notion_access():
+    """Проверяем доступ к Notion"""
+    if not notion:
+        return False, "Notion клиент не инициализирован"
+    if not NOTION_TOKEN:
+        return False, "NOTION_TOKEN не настроен"
+    if not NOTION_DATABASE_ID:
+        return False, "NOTION_DATABASE_ID не настроен"
+    try:
+        # Пробуем получить информацию о базе
+        notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
+
 async def get_packages_from_notion():
+    if not notion or not PACKAGES_DATABASE_ID:
+        return []
     try:
         res = notion.databases.query(database_id=PACKAGES_DATABASE_ID)
         packages = []
@@ -101,7 +132,10 @@ def find_best_package(packages, item_length, item_width, item_height):
     return best_pkg
 
 async def get_client_orders_from_notion(client_name):
-    """Получаем все заказы клиента из Notion"""
+    """Получаем все заказы клиента из Notion с обработкой ошибок"""
+    if not notion or not NOTION_DATABASE_ID:
+        return None, "Notion не настроен"
+    
     try:
         res = notion.databases.query(
             database_id=NOTION_DATABASE_ID,
@@ -113,13 +147,11 @@ async def get_client_orders_from_notion(client_name):
         for page in res.get('results', []):
             props = page['properties']
             created = page.get('created_time', '')[:10]
-            # Парсим товары из описания
             items_text = props.get('Описание товара', {}).get('rich_text', [{}])[0].get('text', {}).get('content', '')
             items_list = []
             for item_str in items_text.split(';'):
                 item_str = item_str.strip()
                 if item_str:
-                    # Пытаемся распарсить "Название × количество"
                     if '×' in item_str:
                         parts = item_str.rsplit('×', 1)
                         name = parts[0].strip()
@@ -141,15 +173,18 @@ async def get_client_orders_from_notion(client_name):
                 'items_text': items_text,
                 'items': items_list,
                 'total': props.get('К ОПЛАТЕ (AMD)', {}).get('number') or props.get('Прибыль (AMD)', {}).get('number'),
-                'raw_props': props,
             }
             orders_list.append(order)
-        return orders_list
+        return orders_list, None
     except Exception as e:
-        logger.error(f"Error fetching client orders: {e}")
-        return []
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"Error fetching client orders: {error_msg}")
+        logger.error(traceback.format_exc())
+        return None, error_msg
 
 async def get_notion_fields():
+    if not notion or not NOTION_DATABASE_ID:
+        return ["Notion не настроен"]
     try:
         res = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
         fields = []
@@ -162,15 +197,24 @@ async def get_notion_fields():
 # ======== МЕНЮ ========
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверяем доступ к Notion
+    has_access, error = await check_notion_access()
+    
+    if has_access:
+        notion_status = "✅ Notion подключен"
+    else:
+        notion_status = f"⚠️ Notion: {error[:50]}..." if len(error) > 50 else f"⚠️ Notion: {error}"
+    
     menu = (
-        "📋 <b>GS Orders Bot</b>\n\n"
+        f"📋 <b>GS Orders Bot</b>\n"
+        f"{notion_status}\n\n"
         "<b>Команды:</b>\n"
-        "/zakaz [имя] - Новый заказ или выбор из базы\n"
-        "/ff - FF для существующего заказа\n"
-        "/dostavka - Доставка РФ\n"
-        "/debug - Поля Notion\n"
-        "/cancel - Отменить\n\n"
-        "Начни с /zakaz [имя клиента]"
+        "/zakaz [имя] — Новый заказ\n"
+        "/ff — FF Китай\n"
+        "/dostavka — Доставка РФ\n"
+        "/debug — Проверить Notion\n"
+        "/cancel — Отменить\n\n"
+        "Если бот молчит — проверь /debug"
     )
     await update.message.reply_text(menu, parse_mode='HTML')
 
@@ -190,8 +234,49 @@ async def cmd_zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     client_name = parts[1].strip()
     
-    # Получаем все заказы клиента
-    client_orders = await get_client_orders_from_notion(client_name)
+    # Проверяем доступ к Notion
+    has_access, error = await check_notion_access()
+    
+    if not has_access:
+        # Режим без Notion — просто новый заказ
+        logger.warning(f"Notion недоступен для {uid}: {error}")
+        orders[uid] = {
+            'client': client_name,
+            'items': [],
+            'type': 'zakaz',
+            'all_client_orders': [],
+            'notion_error': error
+        }
+        await update.message.reply_text(
+            f'⚠️ <b>Notion недоступен</b>: {error[:100]}...\n\n'
+            f'Работаю в режиме без сохранения в базу.\n\n'
+            f'Клиент: <b>{client_name}</b>\n'
+            f'Название товара:',
+            parse_mode='HTML'
+        )
+        return Z_NAME
+    
+    # Получаем заказы клиента
+    client_orders, error = await get_client_orders_from_notion(client_name)
+    
+    if client_orders is None:
+        # Ошибка при получении — работаем без базы
+        logger.error(f"Ошибка получения заказов: {error}")
+        orders[uid] = {
+            'client': client_name,
+            'items': [],
+            'type': 'zakaz',
+            'all_client_orders': [],
+            'notion_error': error
+        }
+        await update.message.reply_text(
+            f'⚠️ Ошибка чтения базы: {error[:100]}...\n\n'
+            f'Работаю в автономном режиме.\n\n'
+            f'Клиент: <b>{client_name}</b>\n'
+            f'Название товара:',
+            parse_mode='HTML'
+        )
+        return Z_NAME
     
     orders[uid] = {
         'client': client_name,
@@ -212,14 +297,20 @@ async def cmd_zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("➕ Новый заказ", callback_data='z_sel_new')])
         
         await update.message.reply_text(
-            f'Клиент: <b>{client_name}</b>\n\nНайдено заказов: {len(client_orders)}\n\n'
-            f'Выбери заказ для работы или создай новый:',
+            f'Клиент: <b>{client_name}</b>\n'
+            f'Найдено заказов: {len(client_orders)}\n\n'
+            f'Выбери заказ или создай новый:',
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='HTML'
         )
         return Z_SELECT_ORDER
     else:
-        await update.message.reply_text(f'Новый клиент: <b>{client_name}</b>\n\nНазвание товара:', parse_mode='HTML')
+        await update.message.reply_text(
+            f'Клиент: <b>{client_name}</b>\n'
+            f'В базе заказов не найдено.\n\n'
+            f'Название товара:',
+            parse_mode='HTML'
+        )
         return Z_NAME
 
 async def z_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -228,33 +319,42 @@ async def z_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     
     if query.data == 'z_sel_new':
-        await query.edit_message_text(f'➕ Новый заказ для <b>{orders[uid]["client"]}</b>\n\nНазвание товара:', parse_mode='HTML')
+        await query.edit_message_text(
+            f'➕ Новый заказ для <b>{orders[uid]["client"]}</b>\n\n'
+            f'Название товара:',
+            parse_mode='HTML'
+        )
         return Z_NAME
     
     # Выбрали существующий заказ
-    order_idx = int(query.data.replace('z_sel_', ''))
-    orders[uid]['selected_order_idx'] = order_idx
-    
-    order = orders[uid]['all_client_orders'][order_idx]
-    date_str = order.get('date', '??')
-    items = order.get('items', [])
-    
-    # Показываем что в заказе
-    items_text = "\n".join([f"• {i['name']} × {i['qty']}" for i in items if i['name']])
-    
-    keyboard = [
-        [InlineKeyboardButton("📝 Использовать как шаблон", callback_data='z_act_template')],
-        [InlineKeyboardButton("✏️ Редактировать количество", callback_data='z_act_edit')],
-        [InlineKeyboardButton("🔢 Выбрать конкретные товары", callback_data='z_act_select')],
-    ]
-    
-    await query.edit_message_text(
-        f'📦 Заказ от {date_str}\n\n'
-        f'Товары ({len(items)} шт):\n{items_text}\n\n'
-        f'Что сделать?',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return Z_ORDER_ACTION
+    try:
+        order_idx = int(query.data.replace('z_sel_', ''))
+        orders[uid]['selected_order_idx'] = order_idx
+        
+        order = orders[uid]['all_client_orders'][order_idx]
+        date_str = order.get('date', '??')
+        items = order.get('items', [])
+        
+        items_text = "\n".join([f"• {i['name']} × {i['qty']}" for i in items if i['name']])
+        
+        keyboard = [
+            [InlineKeyboardButton("📝 Использовать как шаблон", callback_data='z_act_template')],
+            [InlineKeyboardButton("✏️ Редактировать количество", callback_data='z_act_edit')],
+            [InlineKeyboardButton("🔢 Выбрать конкретные товары", callback_data='z_act_select')],
+        ]
+        
+        await query.edit_message_text(
+            f'📦 Заказ от {date_str}\n\n'
+            f'Товары ({len(items)} шт):\n{items_text}\n\n'
+            f'Что сделать?',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return Z_ORDER_ACTION
+    except Exception as e:
+        logger.error(f"Ошибка в z_select_order_cb: {e}")
+        logger.error(traceback.format_exc())
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}\nНачни заново /zakaz')
+        return ConversationHandler.END
 
 async def z_order_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -262,100 +362,113 @@ async def z_order_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     action = query.data
     
-    order_idx = orders[uid]['selected_order_idx']
-    order = orders[uid]['all_client_orders'][order_idx]
-    
-    # Подгружаем курсы
-    if order.get('client_rate'):
-        orders[uid]['client_rate'] = order['client_rate']
-    if order.get('real_rate'):
-        orders[uid]['real_rate'] = order['real_rate']
-    if order.get('rub_rate'):
-        orders[uid]['rub_rate'] = order['rub_rate']
-    
-    items = order.get('items', [])
-    
-    if action == 'z_act_template':
-        # Использовать как шаблон — все товары с новым заказом
-        # Но нам нужны полные данные товаров, а их нет в Notion
-        # Поэтому спрашиваем заново, но с подсказкой
-        await query.edit_message_text(
-            f'📝 Шаблон: {len(items)} товаров\n'
-            f'Курсы: клиент {orders[uid].get("client_rate", "?")}, '
-            f'реальный {orders[uid].get("real_rate", "?")}\n\n'
-            f'Название товара:'
-        )
-        return Z_NAME
-    
-    elif action == 'z_act_edit':
-        # Редактировать количество — показываем товары с полями ввода
-        orders[uid]['edit_items'] = items.copy()
-        orders[uid]['edit_idx'] = 0
-        return await show_edit_item(query, uid)
-    
-    elif action == 'z_act_select':
-        # Выбрать конкретные товары
-        keyboard = []
-        for idx, item in enumerate(items):
-            name = item['name'][:30]
-            keyboard.append([InlineKeyboardButton(
-                f"☐ {name} × {item['qty']}", 
-                callback_data=f'z_item_toggle_{idx}'
-            )])
-        keyboard.append([InlineKeyboardButton("✅ Готово", callback_data='z_items_done')])
+    try:
+        order_idx = orders[uid]['selected_order_idx']
+        order = orders[uid]['all_client_orders'][order_idx]
         
-        orders[uid]['selected_items'] = set()
-        orders[uid]['all_items'] = items
+        # Подгружаем курсы
+        if order.get('client_rate'):
+            orders[uid]['client_rate'] = order['client_rate']
+        if order.get('real_rate'):
+            orders[uid]['real_rate'] = order['real_rate']
+        if order.get('rub_rate'):
+            orders[uid]['rub_rate'] = order['rub_rate']
         
-        await query.edit_message_text(
-            f'🔢 Выбери товары (нажми для выбора):\n\n'
-            f'Выбрано: 0',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return Z_SELECT_ITEMS
+        items = order.get('items', [])
+        
+        if action == 'z_act_template':
+            rates_text = []
+            if orders[uid].get('client_rate'):
+                rates_text.append(f"клиент {orders[uid]['client_rate']}")
+            if orders[uid].get('real_rate'):
+                rates_text.append(f"реальный {orders[uid]['real_rate']}")
+            
+            await query.edit_message_text(
+                f'📝 Шаблон: {len(items)} товаров\n'
+                f'Курсы: {", ".join(rates_text) if rates_text else "нет"}\n\n'
+                f'Название товара:'
+            )
+            return Z_NAME
+        
+        elif action == 'z_act_edit':
+            orders[uid]['edit_items'] = items.copy()
+            orders[uid]['edit_idx'] = 0
+            return await show_edit_item(query, uid)
+        
+        elif action == 'z_act_select':
+            keyboard = []
+            for idx, item in enumerate(items):
+                name = item['name'][:30]
+                qty = item.get('qty', 0)
+                keyboard.append([InlineKeyboardButton(
+                    f"☐ {name} × {qty}", 
+                    callback_data=f'z_item_toggle_{idx}'
+                )])
+            keyboard.append([InlineKeyboardButton("✅ Готово", callback_data='z_items_done')])
+            keyboard.append([InlineKeyboardButton("← Назад", callback_data='z_items_back')])
+            
+            orders[uid]['selected_items'] = set()
+            orders[uid]['all_items'] = items
+            
+            items_list_text = "\n".join([f"• {i['name']} × {i.get('qty', 0)}" for i in items])
+            
+            await query.edit_message_text(
+                f'🔢 Выбери товары (нажми для выбора):\n\n'
+                f'В заказе ({len(items)} шт):\n{items_list_text}\n\n'
+                f'Выбрано: 0',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return Z_SELECT_ITEMS
+    except Exception as e:
+        logger.error(f"Ошибка в z_order_action_cb: {e}")
+        logger.error(traceback.format_exc())
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}\nНачни заново /zakaz')
+        return ConversationHandler.END
 
 async def show_edit_item(query, uid):
     """Показываем товар для редактирования количества"""
-    idx = orders[uid]['edit_idx']
-    items = orders[uid]['edit_items']
-    
-    if idx >= len(items):
-        # Все товары отредактированы
-        # Сохраняем отредактированные товары
-        orders[uid]['items'] = [{
-            'name': i['name'],
-            'qty': i['qty'],
-            'price': 0,  # Нужно будет ввести
-            'purchase': 0,
-            'delivery_factory': 0,
-            'dimensions': '',
-            'dims': (0, 0, 0),
-            'boxes': 1
-        } for i in items if i['qty'] > 0]
+    try:
+        idx = orders[uid]['edit_idx']
+        items = orders[uid]['edit_items']
         
-        if not orders[uid]['items']:
-            await query.edit_message_text('Нет товаров с количеством > 0. Начни сначала /zakaz')
-            return ConversationHandler.END
+        if idx >= len(items):
+            orders[uid]['items'] = [{
+                'name': i['name'],
+                'qty': i['qty'],
+                'price': 0,
+                'purchase': 0,
+                'delivery_factory': 0,
+                'dimensions': '',
+                'dims': (0, 0, 0),
+                'boxes': 1
+            } for i in items if i['qty'] > 0]
+            
+            if not orders[uid]['items']:
+                await query.edit_message_text('Нет товаров с количеством > 0. Начни сначала /zakaz')
+                return ConversationHandler.END
+            
+            await query.edit_message_text(
+                f'✏️ Отредактировано: {len(orders[uid]["items"])} товаров\n\n'
+                f'Название: {orders[uid]["items"][0]["name"]}\n'
+                f'Количество: {orders[uid]["items"][0]["qty"]}\n\n'
+                f'Цена клиенту за 1 шт (CNY):'
+            )
+            orders[uid]['current'] = orders[uid]['items'][0]
+            orders[uid]['item_idx'] = 0
+            return Z_PRICE
         
+        item = items[idx]
         await query.edit_message_text(
-            f'✏️ Отредактировано: {len(orders[uid]["items"])} товаров\n\n'
-            f'Теперь нужно ввести цены для каждого.\n'
-            f'Название: {orders[uid]["items"][0]["name"]}\n'
-            f'Количество: {orders[uid]["items"][0]["qty"]}\n\n'
-            f'Цена клиенту за 1 шт (CNY):'
+            f'✏️ Товар {idx+1}/{len(items)}: <b>{item["name"]}</b>\n'
+            f'Текущее количество: {item["qty"]}\n\n'
+            f'Введи новое количество (или 0 чтобы убрать):',
+            parse_mode='HTML'
         )
-        orders[uid]['current'] = orders[uid]['items'][0]
-        orders[uid]['item_idx'] = 0
-        return Z_PRICE
-    
-    item = items[idx]
-    await query.edit_message_text(
-        f'✏️ Товар {idx+1}/{len(items)}: <b>{item["name"]}</b>\n'
-        f'Текущее количество: {item["qty"]}\n\n'
-        f'Введи новое количество (или 0 чтобы убрать):',
-        parse_mode='HTML'
-    )
-    return Z_EDIT_ITEM_QTY
+        return Z_EDIT_ITEM_QTY
+    except Exception as e:
+        logger.error(f"Ошибка в show_edit_item: {e}")
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
 
 async def z_edit_item_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -365,72 +478,107 @@ async def z_edit_item_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
         orders[uid]['edit_items'][idx]['qty'] = new_qty
         orders[uid]['edit_idx'] += 1
         return await show_edit_item(update, uid)
-    except:
+    except ValueError:
         await update.message.reply_text('Число! Введи количество:')
         return Z_EDIT_ITEM_QTY
+    except Exception as e:
+        logger.error(f"Ошибка в z_edit_item_qty: {e}")
+        await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
 
 async def z_item_toggle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = str(update.effective_user.id)
     
-    if query.data == 'z_items_done':
-        # Завершили выбор
+    try:
+        if query.data == 'z_items_back':
+            # Возвращаемся к выбору действия
+            order_idx = orders[uid]['selected_order_idx']
+            order = orders[uid]['all_client_orders'][order_idx]
+            date_str = order.get('date', '??')
+            items = order.get('items', [])
+            
+            items_text = "\n".join([f"• {i['name']} × {i.get('qty', 0)}" for i in items if i['name']])
+            
+            keyboard = [
+                [InlineKeyboardButton("📝 Использовать как шаблон", callback_data='z_act_template')],
+                [InlineKeyboardButton("✏️ Редактировать количество", callback_data='z_act_edit')],
+                [InlineKeyboardButton("🔢 Выбрать конкретные товары", callback_data='z_act_select')],
+            ]
+            
+            await query.edit_message_text(
+                f'📦 Заказ от {date_str}\n\n'
+                f'Товары ({len(items)} шт):\n{items_text}\n\n'
+                f'Что сделать?',
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return Z_ORDER_ACTION
+        
+        if query.data == 'z_items_done':
+            selected = orders[uid]['selected_items']
+            all_items = orders[uid]['all_items']
+            
+            orders[uid]['items'] = [{
+                'name': all_items[i]['name'],
+                'qty': all_items[i].get('qty', 0),
+                'price': 0,
+                'purchase': 0,
+                'delivery_factory': 0,
+                'dimensions': '',
+                'dims': (0, 0, 0),
+                'boxes': 1
+            } for i in selected]
+            
+            if not orders[uid]['items']:
+                await query.edit_message_text('Ничего не выбрано. Начни сначала /zakaz')
+                return ConversationHandler.END
+            
+            await query.edit_message_text(
+                f'🔢 Выбрано товаров: {len(orders[uid]["items"])}\n\n'
+                f'Название: {orders[uid]["items"][0]["name"]}\n'
+                f'Количество: {orders[uid]["items"][0]["qty"]}\n\n'
+                f'Цена клиенту за 1 шт (CNY):'
+            )
+            orders[uid]['current'] = orders[uid]['items'][0]
+            orders[uid]['item_idx'] = 0
+            return Z_PRICE
+        
+        idx = int(query.data.replace('z_item_toggle_', ''))
         selected = orders[uid]['selected_items']
         all_items = orders[uid]['all_items']
         
-        orders[uid]['items'] = [{
-            'name': all_items[i]['name'],
-            'qty': all_items[i]['qty'],
-            'price': 0,
-            'purchase': 0,
-            'delivery_factory': 0,
-            'dimensions': '',
-            'dims': (0, 0, 0),
-            'boxes': 1
-        } for i in selected]
+        if idx in selected:
+            selected.remove(idx)
+        else:
+            selected.add(idx)
         
-        if not orders[uid]['items']:
-            await query.edit_message_text('Ничего не выбрано. Начни сначала /zakaz')
-            return ConversationHandler.END
+        keyboard = []
+        for i, item in enumerate(all_items):
+            name = item['name'][:30]
+            qty = item.get('qty', 0)
+            mark = "☑️" if i in selected else "☐"
+            keyboard.append([InlineKeyboardButton(
+                f"{mark} {name} × {qty}", 
+                callback_data=f'z_item_toggle_{i}'
+            )])
+        keyboard.append([InlineKeyboardButton("✅ Готово", callback_data='z_items_done')])
+        keyboard.append([InlineKeyboardButton("← Назад", callback_data='z_items_back')])
+        
+        selected_names = [all_items[i]['name'] for i in selected]
+        selected_text = "\n".join([f"• {n}" for n in selected_names]) if selected_names else "(ничего не выбрано)"
         
         await query.edit_message_text(
-            f'🔢 Выбрано товаров: {len(orders[uid]["items"])}\n\n'
-            f'Название: {orders[uid]["items"][0]["name"]}\n'
-            f'Количество: {orders[uid]["items"][0]["qty"]}\n\n'
-            f'Цена клиенту за 1 шт (CNY):'
+            f'🔢 Выбери товары (нажми для выбора):\n\n'
+            f'<b>Выбрано ({len(selected)} шт):</b>\n{selected_text}',
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
         )
-        orders[uid]['current'] = orders[uid]['items'][0]
-        orders[uid]['item_idx'] = 0
-        return Z_PRICE
-    
-    # Toggle item
-    idx = int(query.data.replace('z_item_toggle_', ''))
-    selected = orders[uid]['selected_items']
-    all_items = orders[uid]['all_items']
-    
-    if idx in selected:
-        selected.remove(idx)
-    else:
-        selected.add(idx)
-    
-    # Обновляем клавиатуру
-    keyboard = []
-    for i, item in enumerate(all_items):
-        name = item['name'][:30]
-        mark = "☑️" if i in selected else "☐"
-        keyboard.append([InlineKeyboardButton(
-            f"{mark} {name} × {item['qty']}", 
-            callback_data=f'z_item_toggle_{i}'
-        )])
-    keyboard.append([InlineKeyboardButton("✅ Готово", callback_data='z_items_done')])
-    
-    await query.edit_message_text(
-        f'🔢 Выбери товары (нажми для выбора):\n\n'
-        f'Выбрано: {len(selected)}',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return Z_SELECT_ITEMS
+        return Z_SELECT_ITEMS
+    except Exception as e:
+        logger.error(f"Ошибка в z_item_toggle_cb: {e}")
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
 
 # ======== ВВОД НОВОГО ТОВАРА ========
 
@@ -515,21 +663,26 @@ async def z_more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid = str(update.effective_user.id)
     
-    if query.data == 'z_more_yes':
-        orders[uid]['items'].append(orders[uid]['current'])
-        orders[uid]['current'] = {}
-        await query.edit_message_text('Название товара:')
-        return Z_NAME
-    else:
-        orders[uid]['items'].append(orders[uid]['current'])
-        
-        if 'client_rate' in orders[uid]:
-            await query.edit_message_text(
-                f'Курс клиенту ¥→драм ({orders[uid]["client_rate"]}):\n(отправь новое число или "ok")'
-            )
+    try:
+        if query.data == 'z_more_yes':
+            orders[uid]['items'].append(orders[uid]['current'])
+            orders[uid]['current'] = {}
+            await query.edit_message_text('Название товара:')
+            return Z_NAME
         else:
-            await query.edit_message_text('Курс клиенту ¥→драм (например 58):')
-        return Z_CLIENT_RATE
+            orders[uid]['items'].append(orders[uid]['current'])
+            
+            if 'client_rate' in orders[uid]:
+                await query.edit_message_text(
+                    f'Курс клиенту ¥→драм ({orders[uid]["client_rate"]}):\n(отправь новое число или "ok")'
+                )
+            else:
+                await query.edit_message_text('Курс клиенту ¥→драм (например 58):')
+            return Z_CLIENT_RATE
+    except Exception as e:
+        logger.error(f"Ошибка в z_more_cb: {e}")
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
 
 async def z_client_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -581,9 +734,10 @@ async def z_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             await update.message.reply_text('Выбери комиссию:', reply_markup=InlineKeyboardMarkup(keyboard))
         return Z_COMMISSION
-    except:
-        await update.message.reply_text('Число или "ok"! Курс реальный:')
-        return Z_REAL_RATE
+    except Exception as e:
+        logger.error(f"Ошибка в z_real_rate: {e}")
+        await update.message.reply_text(f'Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
 
 async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -591,58 +745,65 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     data = query.data
     
-    items = orders[uid]['items']
-    client_rate = orders[uid]['client_rate']
-    total_purchase = sum(i['purchase'] * i['qty'] for i in items)
-    delivery = sum(i.get('delivery_factory', 0) for i in items)
-    
-    base_amd = int((total_purchase + delivery) * client_rate)
-    total_price = sum(i['price'] * i['qty'] for i in items)
-    
-    if data == 'z_comm_3':
-        orders[uid]['commission'] = int(base_amd * 0.03)
-        orders[uid]['commission_type'] = '3%'
-    elif data == 'z_comm_5':
-        orders[uid]['commission'] = int(base_amd * 0.05)
-        orders[uid]['commission_type'] = '5%'
-    elif data == 'z_comm_10000':
-        orders[uid]['commission'] = 10000
-        orders[uid]['commission_type'] = '10000'
-    elif data == 'z_comm_15000':
-        orders[uid]['commission'] = 15000
-        orders[uid]['commission_type'] = '15000'
-    
-    commission = orders[uid]['commission']
-    
-    msg = f"📊 <b>Расчёт закупки</b>\n\n"
-    for i in items:
-        msg += f"• {i['name']} × {int(i['qty'])}\n"
-    msg += f"\nТовар: {fmt(total_purchase)}¥\n"
-    msg += f"Доставка: {fmt(delivery)}¥\n"
-    msg += f"━━━━━━━━━━━━\n"
-    msg += f"В закупку: {base_amd} AMD\n"
-    msg += f"Комиссия ({orders[uid]['commission_type']}): {commission} AMD\n"
-    msg += f"<b>Итого: {base_amd + commission} AMD</b>\n\n"
-    msg += f"Для FF используй <b>/ff</b>\n"
-    msg += f"Для доставки РФ используй <b>/dostavka</b>"
-    
-    await query.edit_message_text(msg, parse_mode='HTML')
-    save_session()
-    return ConversationHandler.END
+    try:
+        items = orders[uid]['items']
+        client_rate = orders[uid]['client_rate']
+        total_purchase = sum(i['purchase'] * i['qty'] for i in items)
+        delivery = sum(i.get('delivery_factory', 0) for i in items)
+        
+        base_amd = int((total_purchase + delivery) * client_rate)
+        total_price = sum(i['price'] * i['qty'] for i in items)
+        
+        if data == 'z_comm_3':
+            orders[uid]['commission'] = int(base_amd * 0.03)
+            orders[uid]['commission_type'] = '3%'
+        elif data == 'z_comm_5':
+            orders[uid]['commission'] = int(base_amd * 0.05)
+            orders[uid]['commission_type'] = '5%'
+        elif data == 'z_comm_10000':
+            orders[uid]['commission'] = 10000
+            orders[uid]['commission_type'] = '10000'
+        elif data == 'z_comm_15000':
+            orders[uid]['commission'] = 15000
+            orders[uid]['commission_type'] = '15000'
+        
+        commission = orders[uid]['commission']
+        
+        msg = f"📊 <b>Расчёт закупки</b>\n\n"
+        for i in items:
+            msg += f"• {i['name']} × {int(i['qty'])}\n"
+        msg += f"\nТовар: {fmt(total_purchase)}¥\n"
+        msg += f"Доставка: {fmt(delivery)}¥\n"
+        msg += f"━━━━━━━━━━━━\n"
+        msg += f"В закупку: {base_amd} AMD\n"
+        msg += f"Комиссия ({orders[uid]['commission_type']}): {commission} AMD\n"
+        msg += f"<b>Итого: {base_amd + commission} AMD</b>\n\n"
+        msg += f"Для FF используй <b>/ff</b>\n"
+        msg += f"Для доставки РФ используй <b>/dostavka</b>"
+        
+        # Проверяем была ли ошибка Notion
+        if orders[uid].get('notion_error'):
+            msg += f"\n\n⚠️ <b>Внимание</b>: Notion недоступен, заказ не сохранится в базу!"
+        
+        await query.edit_message_text(msg, parse_mode='HTML')
+        save_session()
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Ошибка в z_commission_cb: {e}")
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
 
 # ======== /FF ========
 
 F_SELECT_ORDER, F_PACKAGES, F_PACKAGE_PRICE, F_WORK, F_THERMAL = range(5)
 
 async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/ff — FF в Китае"""
     uid = str(update.effective_user.id)
     
-    if uid not in orders:
+    if uid not in orders or not orders[uid].get('items'):
         await update.message.reply_text('Сначала выполни /zakaz [имя клиента]')
         return ConversationHandler.END
     
-    # Показываем выбор заказа
     result = await show_order_selection(update, context, uid, F_SELECT_ORDER)
     if result is None:
         return ConversationHandler.END
@@ -652,12 +813,19 @@ async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return F_SELECT_ORDER
 
 async def show_order_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, uid, next_step):
-    """Показываем активные заказы для выбора"""
-    if uid not in orders or not orders[uid].get('all_client_orders'):
-        await update.message.reply_text('Нет сохранённых заказов. Сначала выполни /zakaz [имя]')
+    if uid not in orders:
+        await update.message.reply_text('Сначала выполни /zakaz [имя клиента]')
         return None
     
-    client_orders = orders[uid]['all_client_orders']
+    client_orders = orders[uid].get('all_client_orders', [])
+    client = orders[uid].get('client', 'Неизвестно')
+    
+    if not client_orders:
+        # Нет заказов в базе — работаем с текущим
+        if orders[uid].get('items'):
+            return 'single'
+        await update.message.reply_text('Нет данных для расчёта. Сначала выполни /zakaz')
+        return None
     
     if len(client_orders) == 1:
         await load_order_data(uid, 0)
@@ -673,14 +841,13 @@ async def show_order_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     keyboard.append([InlineKeyboardButton("➕ Новый заказ", callback_data='sel_order_new')])
     
     await update.message.reply_text(
-        f'Клиент: <b>{orders[uid]["client"]}</b>\n\nВыбери заказ:',
+        f'Клиент: <b>{client}</b>\n\nВыбери заказ:',
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='HTML'
     )
     return next_step
 
 async def load_order_data(uid, order_idx):
-    """Загружаем данные выбранного заказа"""
     client_orders = orders[uid].get('all_client_orders', [])
     if 0 <= order_idx < len(client_orders):
         order = client_orders[order_idx]
@@ -701,18 +868,22 @@ async def f_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text('Для нового заказа сначала выполни /zakaz [имя]')
         return ConversationHandler.END
     
-    order_idx = int(query.data.replace('sel_order_', ''))
-    await load_order_data(uid, order_idx)
-    
-    order = orders[uid]['all_client_orders'][order_idx]
-    date_str = order.get('date', '??')
-    
-    await query.edit_message_text(f'Выбран заказ от {date_str}')
-    await start_ff(update, context, uid)
-    return F_PACKAGES
+    try:
+        order_idx = int(query.data.replace('sel_order_', ''))
+        await load_order_data(uid, order_idx)
+        
+        order = orders[uid]['all_client_orders'][order_idx]
+        date_str = order.get('date', '??')
+        
+        await query.edit_message_text(f'Выбран заказ от {date_str}')
+        await start_ff(update, context, uid)
+        return F_PACKAGES
+    except Exception as e:
+        logger.error(f"Ошибка в f_select_order_cb: {e}")
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
 
 async def start_ff(update: Update, context: ContextTypes.DEFAULT_TYPE, uid):
-    """Начинаем расчёт FF"""
     boxes = sum(i.get('boxes', 1) for i in orders[uid]['items'])
     orders[uid]['ff_boxes_total'] = FF_BOX_PRICE * boxes
     orders[uid]['ff_boxes_count'] = boxes
@@ -862,10 +1033,9 @@ async def f_thermal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 D_SELECT_ORDER, D_WAREHOUSE, D_BOXES, D_MORE_WH, D_RUB_RATE, D_CRATING = range(6)
 
 async def cmd_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/dostavka — доставка РФ"""
     uid = str(update.effective_user.id)
     
-    if uid not in orders:
+    if uid not in orders or not orders[uid].get('items'):
         await update.message.reply_text('Сначала выполни /zakaz [имя клиента]')
         return ConversationHandler.END
     
@@ -886,18 +1056,22 @@ async def d_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text('Для нового заказа сначала выполни /zakaz [имя]')
         return ConversationHandler.END
     
-    order_idx = int(query.data.replace('sel_order_', ''))
-    await load_order_data(uid, order_idx)
-    
-    order = orders[uid]['all_client_orders'][order_idx]
-    date_str = order.get('date', '??')
-    
-    await query.edit_message_text(f'Выбран заказ от {date_str}')
-    await start_dostavka(update, context, uid)
-    return D_WAREHOUSE
+    try:
+        order_idx = int(query.data.replace('sel_order_', ''))
+        await load_order_data(uid, order_idx)
+        
+        order = orders[uid]['all_client_orders'][order_idx]
+        date_str = order.get('date', '??')
+        
+        await query.edit_message_text(f'Выбран заказ от {date_str}')
+        await start_dostavka(update, context, uid)
+        return D_WAREHOUSE
+    except Exception as e:
+        logger.error(f"Ошибка в d_select_order_cb: {e}")
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
 
 async def start_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE, uid):
-    """Начинаем расчёт доставки"""
     orders[uid]['warehouses'] = []
     client = orders[uid].get('client', 'Неизвестно')
     
@@ -1003,42 +1177,55 @@ async def d_crating_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid = str(update.effective_user.id)
     
-    crating = 2000 if query.data == 'd_crate_yes' else 0
-    orders[uid]['crating'] = crating
-    
-    rub_rate = orders[uid].get('rub_rate', 5.8)
-    total_boxes = sum(w['boxes'] for w in orders[uid]['warehouses'])
-    
-    fillx_pickup = 7000
-    fillx_receiving = 1000 * total_boxes
-    fillx_unpacking = 500 * total_boxes
-    fillx_delivery = sum(w['cost'] for w in orders[uid]['warehouses'])
-    
-    fillx_total = fillx_pickup + crating + fillx_receiving + fillx_delivery + fillx_unpacking
-    fillx_amd = int(fillx_total * rub_rate)
-    
-    wh_text = "\n".join([f"📦 {w['city']}: {w['tariff']}₽ × {w['boxes']} = {w['cost']}₽" 
-                        for w in orders[uid]['warehouses']])
-    
-    msg = f"📦 <b>FILLX Доставка РФ</b>\n\n"
-    msg += f"{wh_text}\n\n"
-    msg += f"Забор IOB: 7000₽\n"
-    msg += f"Обрешётка: {crating}₽\n"
-    msg += f"Приёмка: {fillx_receiving}₽\n"
-    msg += f"Доставка: {fillx_delivery}₽\n"
-    msg += f"Разбор: {fillx_unpacking}₽\n"
-    msg += f"━━━━━━━━━━━━\n"
-    msg += f"<b>Итого FILLX: {fillx_total}₽ = {fillx_amd} AMD</b>"
-    
-    orders[uid]['fillx_total'] = fillx_total
-    orders[uid]['fillx_amd'] = fillx_amd
-    
-    await query.edit_message_text(msg, parse_mode='HTML')
-    
-    await save_to_notion(update, context, uid)
-    
-    save_session()
-    return ConversationHandler.END
+    try:
+        crating = 2000 if query.data == 'd_crate_yes' else 0
+        orders[uid]['crating'] = crating
+        
+        rub_rate = orders[uid].get('rub_rate', 5.8)
+        total_boxes = sum(w['boxes'] for w in orders[uid]['warehouses'])
+        
+        fillx_pickup = 7000
+        fillx_receiving = 1000 * total_boxes
+        fillx_unpacking = 500 * total_boxes
+        fillx_delivery = sum(w['cost'] for w in orders[uid]['warehouses'])
+        
+        fillx_total = fillx_pickup + crating + fillx_receiving + fillx_delivery + fillx_unpacking
+        fillx_amd = int(fillx_total * rub_rate)
+        
+        wh_text = "\n".join([f"📦 {w['city']}: {w['tariff']}₽ × {w['boxes']} = {w['cost']}₽" 
+                            for w in orders[uid]['warehouses']])
+        
+        msg = f"📦 <b>FILLX Доставка РФ</b>\n\n"
+        msg += f"{wh_text}\n\n"
+        msg += f"Забор IOB: 7000₽\n"
+        msg += f"Обрешётка: {crating}₽\n"
+        msg += f"Приёмка: {fillx_receiving}₽\n"
+        msg += f"Доставка: {fillx_delivery}₽\n"
+        msg += f"Разбор: {fillx_unpacking}₽\n"
+        msg += f"━━━━━━━━━━━━\n"
+        msg += f"<b>Итого FILLX: {fillx_total}₽ = {fillx_amd} AMD</b>"
+        
+        orders[uid]['fillx_total'] = fillx_total
+        orders[uid]['fillx_amd'] = fillx_amd
+        
+        await query.edit_message_text(msg, parse_mode='HTML')
+        
+        # Сохраняем только если Notion доступен
+        has_access, _ = await check_notion_access()
+        if has_access:
+            await save_to_notion(update, context, uid)
+        else:
+            await context.bot.send_message(
+                chat_id=update.callback_query.message.chat_id,
+                text="⚠️ Заказ рассчитан, но не сохранён в Notion (нет доступа)"
+            )
+        
+        save_session()
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Ошибка в d_crating_cb: {e}")
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
 
 async def save_to_notion(update, context, uid):
     try:
@@ -1124,13 +1311,32 @@ async def save_to_notion(update, context, uid):
 # ======== /DEBUG /CANCEL ========
 
 async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        fields = await get_notion_fields()
-        msg = "📋 <b>Поля базы Notion:</b>\n\n"
-        msg += "\n".join(fields[:30])
-        await update.message.reply_text(msg, parse_mode='HTML')
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {str(e)[:200]}")
+    """Диагностика подключения к Notion"""
+    messages = []
+    
+    # Проверяем переменные окружения
+    messages.append(f"🔑 TELEGRAM_TOKEN: {'✅' if TELEGRAM_TOKEN else '❌ Не найден'}")
+    messages.append(f"🔑 NOTION_TOKEN: {'✅' if NOTION_TOKEN else '❌ Не найден'}")
+    messages.append(f"🔑 NOTION_DATABASE_ID: {'✅' if NOTION_DATABASE_ID else '❌ Не найден'}")
+    
+    # Проверяем доступ к Notion
+    has_access, error = await check_notion_access()
+    if has_access:
+        messages.append("✅ Доступ к Notion: OK")
+        
+        # Показываем поля
+        try:
+            fields = await get_notion_fields()
+            messages.append(f"\n📋 Полей в базе: {len(fields)}")
+            messages.append("\n".join(fields[:10]))
+            if len(fields) > 10:
+                messages.append(f"... и ещё {len(fields) - 10}")
+        except Exception as e:
+            messages.append(f"❌ Ошибка чтения полей: {e}")
+    else:
+        messages.append(f"❌ Доступ к Notion: {error}")
+    
+    await update.message.reply_text("\n".join(messages), parse_mode='HTML')
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -1157,7 +1363,7 @@ def main():
         states={
             Z_SELECT_ORDER: [CallbackQueryHandler(z_select_order_cb, pattern='^z_sel_')],
             Z_ORDER_ACTION: [CallbackQueryHandler(z_order_action_cb, pattern='^z_act_')],
-            Z_SELECT_ITEMS: [CallbackQueryHandler(z_item_toggle_cb, pattern='^z_item_toggle_|^z_items_done$')],
+            Z_SELECT_ITEMS: [CallbackQueryHandler(z_item_toggle_cb, pattern='^z_item_toggle_|^z_items_done$|^z_items_back$')],
             Z_EDIT_ITEM_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_edit_item_qty)],
             Z_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_name)],
             Z_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_qty)],
