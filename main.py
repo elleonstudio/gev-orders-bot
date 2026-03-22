@@ -285,9 +285,16 @@ async def cmd_zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Показываем список заказов
             keyboard = []
             for idx, order in enumerate(client_orders[:5]):
-                date_str = order.get('date', '??')
-                items = order.get('items_text', 'Товар')[:30]
-                btn_text = f"📦 {date_str} - {items}..."
+                # Формируем описание товаров вместо даты
+                items_list = order.get('items', [])
+                if items_list:
+                    items_desc = ", ".join([f"{i['name'][:10]}×{i.get('qty', 0)}" for i in items_list[:2] if i.get('name')])
+                    if len(items_list) > 2:
+                        items_desc += f" +{len(items_list)-2}"
+                else:
+                    items_desc = order.get('items_text', 'Товар')[:25]
+                
+                btn_text = f"📦 {items_desc}"
                 keyboard.append([InlineKeyboardButton(btn_text, callback_data=f'z_sel_{idx}')])
             
             keyboard.append([InlineKeyboardButton("➕ Новый заказ", callback_data='z_sel_new')])
@@ -347,8 +354,15 @@ async def z_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         orders[uid]['selected_order_idx'] = order_idx
         
         order = orders[uid]['all_client_orders'][order_idx]
-        date_str = order.get('date', '??')
         items = order.get('items', [])
+        
+        # Формируем описание товаров для заголовка
+        if items:
+            items_summary = ", ".join([f"{i['name']}×{i.get('qty', 0)}" for i in items[:2] if i.get('name')])
+            if len(items) > 2:
+                items_summary += f" +{len(items)-2}"
+        else:
+            items_summary = order.get('items_text', 'Товар')[:30]
         
         items_text = "\n".join([f"• {i['name']} × {i['qty']}" for i in items if i['name']])
         
@@ -359,7 +373,7 @@ async def z_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         
         await query.edit_message_text(
-            f'📦 Заказ от {date_str}\n\n'
+            f'📦 {items_summary}\n\n'
             f'Товары ({len(items)} шт):\n{items_text}\n\n'
             f'Что сделать?',
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -1081,9 +1095,15 @@ async def f_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await load_order_data(uid, order_idx)
         
         order = orders[uid]['all_client_orders'][order_idx]
-        date_str = order.get('date', '??')
+        items_list = order.get('items', [])
+        if items_list:
+            items_summary = ", ".join([f"{i['name']}×{i.get('qty', 0)}" for i in items_list[:2] if i.get('name')])
+            if len(items_list) > 2:
+                items_summary += f" +{len(items_list)-2}"
+        else:
+            items_summary = order.get('items_text', 'Товар')[:30]
         
-        await query.edit_message_text(f'Выбран заказ от {date_str}')
+        await query.edit_message_text(f'Выбрано: {items_summary}')
         await start_ff(update, context, uid)
         return F_PACKAGES
     except Exception as e:
@@ -1302,9 +1322,15 @@ async def d_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await load_order_data(uid, order_idx)
         
         order = orders[uid]['all_client_orders'][order_idx]
-        date_str = order.get('date', '??')
+        items_list = order.get('items', [])
+        if items_list:
+            items_summary = ", ".join([f"{i['name']}×{i.get('qty', 0)}" for i in items_list[:2] if i.get('name')])
+            if len(items_list) > 2:
+                items_summary += f" +{len(items_list)-2}"
+        else:
+            items_summary = order.get('items_text', 'Товар')[:30]
         
-        await query.edit_message_text(f'Выбран заказ от {date_str}')
+        await query.edit_message_text(f'Выбрано: {items_summary}')
         await start_dostavka(update, context, uid)
         return D_WAREHOUSE
     except Exception as e:
