@@ -149,6 +149,7 @@ async def get_client_orders_from_notion(client_name):
             created = page.get('created_time', '')[:10]
             items_text = props.get('Описание товара', {}).get('rich_text', [{}])[0].get('text', {}).get('content', '')
             items_list = []
+            seen_names = set()  # Для дедупликации
             for item_str in items_text.split(';'):
                 item_str = item_str.strip()
                 if item_str:
@@ -157,11 +158,15 @@ async def get_client_orders_from_notion(client_name):
                         name = parts[0].strip()
                         try:
                             qty = int(parts[1].strip())
-                            items_list.append({'name': name, 'qty': qty})
                         except:
-                            items_list.append({'name': item_str, 'qty': 0})
+                            qty = 0
                     else:
-                        items_list.append({'name': item_str, 'qty': 0})
+                        name = item_str
+                        qty = 0
+                    # Пропускаем дубликаты по названию
+                    if name and name not in seen_names:
+                        seen_names.add(name)
+                        items_list.append({'name': name, 'qty': qty})
             
             order = {
                 'id': page['id'],
