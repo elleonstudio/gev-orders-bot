@@ -26,7 +26,7 @@ TARIFFS = {
     "Екатеринбург": 1400, "Екатеринбург (6-10)": 1200,
 }
 
-# 22 состояния (добавлено PACKAGE_PRICE_MANUAL)
+# Состояния
 INVOICE = 0
 PRODUCT_NAME = 1
 QUANTITY = 2
@@ -35,20 +35,22 @@ PURCHASE = 4
 DELIVERY_FACTORY = 5
 DIMENSIONS = 6
 PACKAGE_SELECT = 7
-PACKAGE_PRICE_MANUAL = 21  # НОВОЕ: ввод цены пакета вручную
-MORE = 8
-NEED_FF = 9
-CLIENT_RATE = 10
-REAL_RATE = 11
-RUB_RATE = 12
-FF_PICKUP = 13
-FF_BOX_PRICE = 14
-FF_STICKER_PRICE = 15
-THERMAL_PAPER_QTY = 16
-FF_WORK_PRICE = 17
-WAREHOUSE = 18
-BOX_COUNT = 19
-CRATING = 20
+PACKAGE_PRICE_MANUAL = 8
+MORE = 9
+NEED_FF = 10
+FF_PICKUP = 11
+FF_BOX_PRICE = 12
+FF_STICKER_PRICE = 13
+THERMAL_PAPER_QTY = 14
+FF_WORK_PRICE = 15
+CLIENT_RATE = 16
+REAL_RATE = 17
+RUB_RATE = 18
+WAREHOUSE_SELECT = 19
+WAREHOUSE_BOXES = 20
+MORE_WAREHOUSES = 21
+CRATING = 22
+COMMISSION = 23
 
 orders = {}
 packages_cache = None
@@ -146,7 +148,14 @@ async def zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = parts[1].strip()
         uid = update.effective_user.id
         logger.info(f"Starting order for {name}, uid={uid}")
-        orders[uid] = {'client': name, 'items': [], 'current': {}, 'invoice': False, 'need_ff': True}
+        orders[uid] = {
+            'client': name, 
+            'items': [], 
+            'current': {}, 
+            'invoice': False, 
+            'need_ff': True,
+            'warehouses': []  # Список складов с количеством коробок
+        }
         history = await get_client_orders(name)
         if history:
             keyboard = []
@@ -317,15 +326,13 @@ async def get_dimensions(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return PACKAGE_SELECT
         else:
-            # Пакет не найден - спрашиваем цену вручную
             await update.message.reply_text(f'📐 Размеры: {int(l)}×{int(w)}×{int(h)} см\n📦 В короб влезет: ~{items_per_box} шт\n📦 Коробок: {boxes}\n\n⚠️ Пакет не найден. Введи цену пакетов (¥):')
             orders[uid]['current']['package'] = None
-            return PACKAGE_PRICE_MANUAL  # Используем правильное состояние!
+            return PACKAGE_PRICE_MANUAL
     except:
         await update.message.reply_text('Неверный формат. Введи 3 числа:\n15 10 8')
         return DIMENSIONS
 
-# НОВАЯ ФУНКЦИЯ: обработка ввода цены пакета вручную
 async def get_package_price_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
@@ -365,7 +372,7 @@ async def package_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return PACKAGE_SELECT
     elif data == 'pkg_custom':
         await query.edit_message_text('Введи цену пакетов (¥):')
-        return PACKAGE_PRICE_MANUAL  # Теперь используем правильное состояние
+        return PACKAGE_PRICE_MANUAL
     elif data.startswith('pkg_'):
         pkg_id = data.replace('pkg_', '')
         packages = await get_packages_from_notion()
@@ -496,6 +503,7 @@ async def get_rub_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         orders[uid]['rub_rate'] = float(update.message.text)
+        # Переходим к выбору складов
         keyboard = []
         cities = [c for c in TARIFFS.keys() if '(' not in c]
         for i in range(0, len(cities), 2):
@@ -504,51 +512,158 @@ async def get_rub_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 row.append(InlineKeyboardButton(cities[i+1], callback_data=f'wh_{cities[i+1]}'))
             keyboard.append(row)
         await update.message.reply_text('Выбери склад РФ:', reply_markup=InlineKeyboardMarkup(keyboard))
-        return WAREHOUSE
+        return WAREHOUSE_SELECT
     except:
         await update.message.reply_text('Число!')
         return RUB_RATE
 
-async def warehouse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def warehouse_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = update.effective_user.id
     city = query.data.replace('wh_', '')
-    orders[uid]['warehouse'] = city
-    boxes = sum(i.get('boxes', 1) for i in orders[uid]['items'])
-    if city == "Казань" and boxes >= 8:
-        city = "Казань (8-10)"
-    elif city == "Екатеринбург" and boxes >= 6:
-        city = "Екатеринбург (6-10)"
-    price_per_box = TARIFFS.get(city, 1000)
-    orders[uid]['fillx_delivery'] = price_per_box * boxes
-    await query.edit_message_text(f'{city}: {price_per_box}₽ × {boxes} короб = {price_per_box * boxes}₽\n\nСколько коробок всего?')
-    return BOX_COUNT
+    orders[uid]['current_warehouse'] = city
+    await query.edit_message_text(f'Склад: {city}\n\nСколько коробок на этот склад?')
+    return WAREHOUSE_BOXES
 
-async def get_box_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def get_warehouse_boxes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     try:
         boxes = int(update.message.text)
-        city = orders[uid]['warehouse']
-        if city == "Казань":
-            city = "Казань (8-10)" if boxes >= 8 else "Казань"
-        elif city == "Екатеринбург":
-            city = "Екатеринбург (6-10)" if boxes >= 6 else "Екатеринбург"
-        price_per_box = TARIFFS.get(city, 1000)
-        orders[uid]['fillx_delivery'] = price_per_box * boxes
-        orders[uid]['total_boxes'] = boxes
-        keyboard = [[InlineKeyboardButton("Да", callback_data='crate_yes'), InlineKeyboardButton("Нет", callback_data='crate_no')]]
-        await update.message.reply_text('FILLX — Снятие обрешётки (2000₽)?', reply_markup=InlineKeyboardMarkup(keyboard))
-        return CRATING
+        city = orders[uid]['current_warehouse']
+        
+        # Определяем тариф
+        if city == "Казань" and boxes >= 8:
+            tariff_city = "Казань (8-10)"
+        elif city == "Екатеринбург" and boxes >= 6:
+            tariff_city = "Екатеринбург (6-10)"
+        else:
+            tariff_city = city
+        
+        price_per_box = TARIFFS.get(tariff_city, 1000)
+        delivery_cost = price_per_box * boxes
+        
+        # Добавляем склад в список
+        orders[uid]['warehouses'].append({
+            'city': city,
+            'boxes': boxes,
+            'tariff': price_per_box,
+            'delivery': delivery_cost
+        })
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ Да, добавить склад", callback_data='add_wh_yes')],
+            [InlineKeyboardButton("❌ Нет, продолжить", callback_data='add_wh_no')]
+        ]
+        await update.message.reply_text(
+            f'📦 {city}: {price_per_box}₽ × {boxes} = {delivery_cost}₽\n\nДобавить ещё склад?',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return MORE_WAREHOUSES
     except:
-        await update.message.reply_text('Число!')
-        return BOX_COUNT
+        await update.message.reply_text('Число! Сколько коробок?')
+        return WAREHOUSE_BOXES
+
+async def more_warehouses_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = update.effective_user.id
+    
+    if query.data == 'add_wh_yes':
+        # Показываем список складов снова
+        keyboard = []
+        cities = [c for c in TARIFFS.keys() if '(' not in c]
+        for i in range(0, len(cities), 2):
+            row = [InlineKeyboardButton(cities[i], callback_data=f'wh_{cities[i]}')]
+            if i + 1 < len(cities):
+                row.append(InlineKeyboardButton(cities[i+1], callback_data=f'wh_{cities[i+1]}'))
+            keyboard.append(row)
+        await query.edit_message_text('Выбери склад РФ:', reply_markup=InlineKeyboardMarkup(keyboard))
+        return WAREHOUSE_SELECT
+    else:
+        # Показываем сумму по всем складам и переходим к обрешётке
+        warehouses = orders[uid]['warehouses']
+        total_boxes = sum(w['boxes'] for w in warehouses)
+        total_delivery = sum(w['delivery'] for w in warehouses)
+        
+        wh_text = "\n".join([f"📦 {w['city']}: {w['tariff']}₽ × {w['boxes']} = {w['delivery']}₽" for w in warehouses])
+        
+        orders[uid]['total_boxes'] = total_boxes
+        orders[uid]['fillx_delivery'] = total_delivery
+        
+        keyboard = [[InlineKeyboardButton("Да", callback_data='crate_yes'), InlineKeyboardButton("Нет", callback_data='crate_no')]]
+        await query.edit_message_text(
+            f'Склады РФ:\n{wh_text}\n\nИтого: {total_boxes} коробок, {total_delivery}₽\n\nFILLX — Снятие обрешётки (2000₽)?',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return CRATING
 
 async def crating_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = update.effective_user.id
     orders[uid]['fillx_crating'] = 2000 if query.data == 'crate_yes' else 0
+    
+    # Теперь считаем комиссию
+    # Комиссия считается от (закупка + доставка фабрика) × курс клиента
+    items = orders[uid]['items']
+    client_rate = orders[uid]['client_rate']
+    
+    total_purchase_yuan = sum(i['purchase'] * i['qty'] for i in items)
+    delivery_factory_yuan = sum(i.get('delivery_factory', 0) for i in items)
+    
+    purchase_base_amd = int((total_purchase_yuan + delivery_factory_yuan) * client_rate)
+    commission_3pct = int(purchase_base_amd * 0.03)
+    
+    if commission_3pct < 10000:
+        # Фиксированная комиссия
+        keyboard = [
+            [InlineKeyboardButton("10000 драм", callback_data='comm_10000')],
+            [InlineKeyboardButton("15000 драм", callback_data='comm_15000')]
+        ]
+        await query.edit_message_text(
+            f'Комиссия:\n\n3% = {commission_3pct} драм (меньше 10000)\n\nВыбери фикс:',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        # Процентная комиссия
+        commission_5pct = int(purchase_base_amd * 0.05)
+        keyboard = [
+            [InlineKeyboardButton(f"3% = {commission_3pct} драм", callback_data='comm_3')],
+            [InlineKeyboardButton(f"5% = {commission_5pct} драм", callback_data='comm_5')]
+        ]
+        await query.edit_message_text(
+            f'Комиссия:\n\nВыбери процент:',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    return COMMISSION
+
+async def commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = update.effective_user.id
+    
+    data = query.data
+    items = orders[uid]['items']
+    client_rate = orders[uid]['client_rate']
+    
+    total_purchase_yuan = sum(i['purchase'] * i['qty'] for i in items)
+    delivery_factory_yuan = sum(i.get('delivery_factory', 0) for i in items)
+    purchase_base_amd = int((total_purchase_yuan + delivery_factory_yuan) * client_rate)
+    
+    if data == 'comm_3':
+        orders[uid]['commission'] = int(purchase_base_amd * 0.03)
+        orders[uid]['commission_type'] = '3%'
+    elif data == 'comm_5':
+        orders[uid]['commission'] = int(purchase_base_amd * 0.05)
+        orders[uid]['commission_type'] = '5%'
+    elif data == 'comm_10000':
+        orders[uid]['commission'] = 10000
+        orders[uid]['commission_type'] = '10000'
+    elif data == 'comm_15000':
+        orders[uid]['commission'] = 15000
+        orders[uid]['commission_type'] = '15000'
+    
     await calculate_and_show_result(update, context)
     return ConversationHandler.END
 
@@ -562,13 +677,22 @@ async def calculate_and_show_result(update, context):
         rub_rate = orders[uid]['rub_rate']
         invoice = orders[uid]['invoice']
         need_ff = orders[uid].get('need_ff', True)
+        commission = orders[uid].get('commission', 0)
+        commission_type = orders[uid].get('commission_type', '')
         order_code = get_code(client)
+        
         total_qty = sum(i['qty'] for i in items)
         total_boxes = orders[uid].get('total_boxes', sum(i.get('boxes', 1) for i in items))
+        
+        # Цены для клиента
         total_yuan = sum(i['price'] * i['qty'] for i in items)
+        
+        # Закупка и доставка фабрика
         total_purchase_yuan = sum(i['purchase'] * i['qty'] for i in items)
         delivery_factory_yuan = sum(i.get('delivery_factory', 0) for i in items)
         total_packages_yuan = sum(i.get('package_total', 0) for i in items)
+        
+        # FF Китай
         if need_ff:
             ff_pickup = orders[uid].get('ff_pickup', 0)
             ff_boxes = orders[uid].get('ff_boxes', 0)
@@ -579,7 +703,10 @@ async def calculate_and_show_result(update, context):
         else:
             ff_pickup = ff_boxes = ff_stickers = ff_thermal_paper = ff_work = 0
             ff_total_yuan = 0
+        
         ff_total_amd = int(ff_total_yuan * real_rate)
+        
+        # FILLX
         fillx_pickup = 7000
         fillx_crating = orders[uid].get('fillx_crating', 0)
         fillx_receiving = 1000 * total_boxes
@@ -587,11 +714,21 @@ async def calculate_and_show_result(update, context):
         fillx_unpacking = 500 * total_boxes
         fillx_total_rub = fillx_pickup + fillx_crating + fillx_receiving + fillx_delivery + fillx_unpacking
         fillx_total_amd = int(fillx_total_rub * rub_rate)
+        
+        # Комиссия (уже посчитана в драмах)
+        commission_amd = commission
+        
+        # Итоги
         client_total_yuan = total_yuan + ff_total_yuan
         client_total_amd = int(client_total_yuan * client_rate)
+        
+        # Расходы
         purchase_amd = int((total_purchase_yuan + delivery_factory_yuan) * real_rate)
-        total_costs_amd = purchase_amd + ff_total_amd + fillx_total_amd
+        total_costs_amd = purchase_amd + ff_total_amd + fillx_total_amd + commission_amd
+        
         profit_amd = client_total_amd - total_costs_amd
+        
+        # Формирование сообщений
         client_msg = f"{order_code}\n\n"
         for i in items:
             client_msg += f"• {i['name']} × {int(i['qty'])}\n"
@@ -599,10 +736,49 @@ async def calculate_and_show_result(update, context):
         if need_ff:
             client_msg += f"Фулфилмент: {fmt(ff_total_yuan)} ¥\n"
         client_msg += f"━━━━━━━━━━━━\nИТОГО ¥: {fmt(client_total_yuan)}\nК ОПЛАТЕ: {client_total_amd} AMD"
-        my_msg = f"📊 {order_code}\n\n─── ЗАКУПКА ───\nТовар: {fmt(total_purchase_yuan)}¥ = {purchase_amd} AMD\nДоставка: {fmt(delivery_factory_yuan)}¥\n\n"
+        
+        # Детальный расчёт для тебя
+        my_msg = f"📊 {order_code}\n\n"
+        my_msg += f"─── ЗАКУПКА ───\n"
+        my_msg += f"Товар: {fmt(total_purchase_yuan)}¥\n"
+        my_msg += f"Доставка фабрика→склад: {fmt(delivery_factory_yuan)}¥\n"
+        my_msg += f"В закупку (реальный курс): {purchase_amd} AMD\n\n"
+        
         if need_ff:
-            my_msg += f"─── FF КИТАЙ ({fmt(ff_total_yuan)}¥) ───\nЗабор: {fmt(ff_pickup)}¥\nКоробки: {fmt(ff_boxes)}¥\nПакеты: {fmt(total_packages_yuan)}¥\nНаклейки: {fmt(ff_stickers)}¥\nТермобумага: {fmt(ff_thermal_paper)}¥\nРабота: {fmt(ff_work)}¥\nИтого FF: {ff_total_amd} AMD\n\n"
-        my_msg += f"─── FILLX ({fillx_total_rub}₽) ───\nЗабор: 7000₽\nОбрешётка: {fillx_crating}₽\nПриёмка: {fillx_receiving}₽\nДоставка: {fillx_delivery}₽\nРазбор: {fillx_unpacking}₽\nИтого: {fillx_total_amd} AMD\n\n─── ИТОГО ───\nВыручка: {client_total_amd} AMD\nРасходы: {total_costs_amd} AMD\n💰 ПРИБЫЛЬ: {profit_amd} AMD"
+            my_msg += f"─── FF КИТАЙ ({fmt(ff_total_yuan)}¥ × {real_rate}) ───\n"
+            my_msg += f"Забор: {fmt(ff_pickup)}¥\n"
+            my_msg += f"Коробки: {fmt(ff_boxes)}¥\n"
+            my_msg += f"Пакеты: {fmt(total_packages_yuan)}¥\n"
+            my_msg += f"Наклейки: {fmt(ff_stickers)}¥\n"
+            my_msg += f"Термобумага: {fmt(ff_thermal_paper)}¥\n"
+            my_msg += f"Работа: {fmt(ff_work)}¥\n"
+            my_msg += f"Итого FF: {ff_total_amd} AMD\n\n"
+        
+        # Склады РФ
+        warehouses = orders[uid].get('warehouses', [])
+        if warehouses:
+            my_msg += f"─── ДОСТАВКА РФ ───\n"
+            for wh in warehouses:
+                my_msg += f"📦 {wh['city']}: {wh['tariff']}₽ × {wh['boxes']} = {wh['delivery']}₽\n"
+            my_msg += f"\n"
+        
+        my_msg += f"─── FILLX ({fillx_total_rub}₽ × {rub_rate}) ───\n"
+        my_msg += f"Забор IOB: 7000₽\n"
+        my_msg += f"Обрешётка: {fillx_crating}₽\n"
+        my_msg += f"Приёмка: {fillx_receiving}₽\n"
+        my_msg += f"Доставка: {fillx_delivery}₽\n"
+        my_msg += f"Разбор: {fillx_unpacking}₽\n"
+        my_msg += f"Итого FILLX: {fillx_total_amd} AMD\n\n"
+        
+        my_msg += f"─── КОМИССИЯ ({commission_type}) ───\n"
+        my_msg += f"{commission_amd} AMD\n\n"
+        
+        my_msg += f"─── ИТОГО ───\n"
+        my_msg += f"Выручка: {client_total_amd} AMD\n"
+        my_msg += f"Расходы: {total_costs_amd} AMD\n"
+        my_msg += f"💰 ПРИБЫЛЬ: {profit_amd} AMD"
+        
+        # Отправка сообщений
         if hasattr(update, 'callback_query'):
             chat_id = update.callback_query.message.chat_id
             await context.bot.send_message(chat_id=chat_id, text=client_msg)
@@ -610,9 +786,13 @@ async def calculate_and_show_result(update, context):
         else:
             await update.message.reply_text(client_msg)
             await update.message.reply_text(my_msg)
+        
+        # Сохранение в Notion
         try:
-            items_description = "; ".join([f"{i['name']} (x{int(i['qty'])})" for i in items])
+            items_description = "; ".join([f"{i['name']} (x{int(i['qty'])}" for i in items])
             dimensions_str = items[0].get('dimensions', '')
+            warehouses_str = ", ".join([f"{w['city']}:{w['boxes']}" for w in warehouses])
+            
             notion.pages.create(
                 parent={"database_id": NOTION_DATABASE_ID},
                 properties={
@@ -629,10 +809,10 @@ async def calculate_and_show_result(update, context):
                     "Курс реальный": {"number": float(real_rate)},
                     "Курс ₽→драм": {"number": float(rub_rate)},
                     "Закупка реальная (AMD)": {"number": purchase_amd},
-                    " К ОПЛАТЕ (AMD)": {"number": client_total_amd},
+                    "К ОПЛАТЕ (AMD)": {"number": client_total_amd},
                     "Прибыль (AMD)": {"number": profit_amd},
                     "Клиент": {"select": {"name": client}},
-                    "Склад РФ": {"select": {"name": orders[uid].get('warehouse', 'Москва')}},
+                    "Склад РФ": {"rich_text": [{"text": {"content": warehouses_str}}]},
                     "FF Забор груза": {"number": ff_pickup},
                     "FF Коробки": {"number": ff_boxes},
                     "FF Пакеты": {"number": total_packages_yuan},
@@ -648,7 +828,9 @@ async def calculate_and_show_result(update, context):
                     "FILLX Разбор": {"number": fillx_unpacking},
                     "FILLX Итого (₽)": {"number": fillx_total_rub},
                     "FILLX Итого (AMD)": {"number": fillx_total_amd},
-                    " Инвойс": {"select": {"name": "Да" if invoice else "Нет"}},
+                    "Комиссия": {"number": commission_amd},
+                    "Тип комиссии": {"select": {"name": commission_type}},
+                    "Инвойс": {"select": {"name": "Да" if invoice else "Нет"}},
                     "Статус": {"select": {"name": "Новый"}},
                 }
             )
@@ -662,6 +844,7 @@ async def calculate_and_show_result(update, context):
                 await context.bot.send_message(chat_id=update.callback_query.message.chat_id, text=f"❌ Ошибка сохранения: {str(e)[:200]}")
             else:
                 await update.message.reply_text(f"❌ Ошибка сохранения: {str(e)[:200]}")
+        
         del orders[uid]
     except Exception as e:
         logger.error(f"Error in calculate_and_show_result: {e}")
@@ -694,20 +877,22 @@ def main():
             DELIVERY_FACTORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_delivery_factory)],
             DIMENSIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_dimensions)],
             PACKAGE_SELECT: [CallbackQueryHandler(package_select_cb, pattern='^(pkg_ok|pkg_select|pkg_custom|pkg_)')],
-            PACKAGE_PRICE_MANUAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_package_price_manual)],  # НОВОЕ
+            PACKAGE_PRICE_MANUAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_package_price_manual)],
             MORE: [CallbackQueryHandler(more_cb, pattern='^more_')],
             NEED_FF: [CallbackQueryHandler(need_ff_cb, pattern='^ff_')],
-            CLIENT_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_rate)],
-            REAL_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_real_rate)],
-            RUB_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_rub_rate)],
             FF_PICKUP: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_ff_pickup)],
             FF_BOX_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_ff_box)],
             FF_STICKER_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_ff_sticker)],
             THERMAL_PAPER_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_thermal_paper_qty)],
             FF_WORK_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_ff_work)],
-            WAREHOUSE: [CallbackQueryHandler(warehouse_cb, pattern='^wh_')],
-            BOX_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_box_count)],
+            CLIENT_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_client_rate)],
+            REAL_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_real_rate)],
+            RUB_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_rub_rate)],
+            WAREHOUSE_SELECT: [CallbackQueryHandler(warehouse_select_cb, pattern='^wh_')],
+            WAREHOUSE_BOXES: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_warehouse_boxes)],
+            MORE_WAREHOUSES: [CallbackQueryHandler(more_warehouses_cb, pattern='^add_wh_')],
             CRATING: [CallbackQueryHandler(crating_cb, pattern='^crate_')],
+            COMMISSION: [CallbackQueryHandler(commission_cb, pattern='^comm_')],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
