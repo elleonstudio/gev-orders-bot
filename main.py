@@ -827,27 +827,36 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 1. Товар + Доставка в CNY
         total_cny = total_price + delivery
         
-        # 2. Комиссия считается в CNY!
+        # 2. Комиссия
         if commission_type == '3%':
             commission_cny = int(total_cny * 0.03)
+            commission_amd = int(commission_cny * client_rate)
         elif commission_type == '5%':
             commission_cny = int(total_cny * 0.05)
+            commission_amd = int(commission_cny * client_rate)
         elif commission_type == '10000':
-            # Фикс 10000 AMD → переводим в CNY
-            commission_cny = int(10000 / client_rate)
+            # Фикс 10000 AMD
+            commission_amd = 10000
+            commission_cny = round(10000 / client_rate, 2)  # Только для отображения
         elif commission_type == '15000':
-            commission_cny = int(15000 / client_rate)
+            # Фикс 15000 AMD
+            commission_amd = 15000
+            commission_cny = round(15000 / client_rate, 2)
         
         orders[uid]['commission_cny'] = commission_cny
-        orders[uid]['commission_amd'] = int(commission_cny * client_rate)
+        orders[uid]['commission_amd'] = commission_amd
         
-        # 3. Итог в CNY с комиссией
-        total_with_commission_cny = total_cny + commission_cny
+        # 3. Итог в AMD
+        # Процент: (total_cny + commission_cny) * rate
+        # Фикс: (total_cny * rate) + commission_amd
+        if commission_type in ['3%', '5%']:
+            total_with_commission_cny = total_cny + commission_cny
+            total_amd_client = int(total_with_commission_cny * client_rate)
+        else:  # Фиксированная
+            total_amd_client = int(total_cny * client_rate) + commission_amd
+        
         orders[uid]['total_cny'] = total_cny
-        orders[uid]['total_with_commission_cny'] = total_with_commission_cny
-        
-        # 4. Переводим в AMD
-        total_amd_client = int(total_with_commission_cny * client_rate)
+        orders[uid]['total_with_commission_cny'] = total_cny + commission_cny
         orders[uid]['total_amd'] = total_amd_client
         
         client_name = orders[uid]['client']
@@ -870,12 +879,20 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client_msg += f"Доставка: {fmt(delivery)}¥\n"
         client_msg += f"━━━━━━━━━━━━\n"
         client_msg += f"Итого: {fmt(total_cny)}¥\n"
-        client_msg += f"+ Комиссия ({commission_type}): {fmt(commission_cny)}¥\n"
-        client_msg += f"━━━━━━━━━━━━\n"
-        client_msg += f"Всего: {fmt(total_with_commission_cny)}¥\n"
-        client_msg += f"× Курс {client_rate} = <b>{total_amd_client:,} AMD</b>\n"
-        client_msg += f"━━━━━━━━━━━━\n"
-        client_msg += f"<b>К ОПЛАТЕ: {total_amd_client:,} AMD</b>\n"
+        
+        if commission_type in ['3%', '5%']:
+            client_msg += f"+ Комиссия ({commission_type}): {fmt(commission_cny)}¥\n"
+            client_msg += f"━━━━━━━━━━━━\n"
+            client_msg += f"Всего: {fmt(total_cny + commission_cny)}¥\n"
+            client_msg += f"× Курс {client_rate} = <b>{total_amd_client:,} AMD</b>\n"
+        else:
+            # Фиксированная комиссия — показываем в AMD сразу
+            subtotal_amd = int(total_cny * client_rate)
+            client_msg += f"× Курс {client_rate} = {subtotal_amd:,} AMD\n"
+            client_msg += f"+ Комиссия ({commission_type}): {commission_amd:,} AMD\n"
+            client_msg += f"━━━━━━━━━━━━\n"
+            client_msg += f"<b>К ОПЛАТЕ: {total_amd_client:,} AMD</b>\n"
+        
         client_msg += f"━━━━━━━━━━━━"
         
         # === ПИСЬМО ДЛЯ СЕБЯ (детальное) ===
@@ -899,7 +916,12 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         my_msg += f"<b>От клиента ({client_rate}):</b>\n"
         my_msg += f"  • Товар+доставка: {fmt(total_cny)}¥ × {client_rate} = {int(total_cny * client_rate):,} AMD\n"
-        my_msg += f"  • Комиссия ({commission_type}): {fmt(commission_cny)}¥ × {client_rate} = {commission_amd:,} AMD\n"
+        
+        if commission_type in ['3%', '5%']:
+            my_msg += f"  • Комиссия ({commission_type}): {fmt(commission_cny)}¥ × {client_rate} = {commission_amd:,} AMD\n"
+        else:
+            my_msg += f"  • Комиссия ({commission_type}): {commission_amd:,} AMD\n"
+        
         my_msg += f"  • <b>Итого: {received_amd:,} AMD</b>\n\n"
         
         my_msg += f"<b>Прибыль:</b> {received_amd:,} - {purchase_amd:,} = <b>{profit:,} AMD</b>\n\n"
