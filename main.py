@@ -392,7 +392,7 @@ async def z_order_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         items = order.get('items', [])
         
-        elif action == 'z_act_template':
+        if action == 'z_act_template':
             # Использовать как шаблон — спрашиваем про инвойс
             keyboard = [
                 [InlineKeyboardButton("✅ Да, нужен инвойс", callback_data='z_invoice_yes')],
