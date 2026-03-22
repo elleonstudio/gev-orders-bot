@@ -1019,9 +1019,17 @@ async def show_order_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     
     keyboard = []
     for idx, order in enumerate(client_orders[:5]):
-        date_str = order.get('date', '??')
-        items = order.get('items_text', 'Товар')[:20]
-        btn_text = f"{date_str} - {items}..."
+        # Формируем понятное описание товаров
+        items_list = order.get('items', [])
+        if items_list:
+            # Показываем первые 2 товара с количеством
+            items_desc = ", ".join([f"{i['name'][:10]}×{i.get('qty', 0)}" for i in items_list[:2] if i.get('name')])
+            if len(items_list) > 2:
+                items_desc += f" +{len(items_list)-2}"
+        else:
+            items_desc = order.get('items_text', 'Товар')[:25]
+        
+        btn_text = f"📦 {items_desc}"
         keyboard.append([InlineKeyboardButton(btn_text, callback_data=f'sel_order_{idx}')])
     
     keyboard.append([InlineKeyboardButton("➕ Новый заказ", callback_data='sel_order_new')])
@@ -1044,6 +1052,20 @@ async def load_order_data(uid, order_idx):
         if order.get('rub_rate'):
             orders[uid]['rub_rate'] = order['rub_rate']
         orders[uid]['selected_order_date'] = order.get('date', '')
+        # Сохраняем ID страницы Notion для обновления
+        orders[uid]['notion_page_id'] = order.get('id')
+        # Загружаем товары из заказа
+        if order.get('items'):
+            orders[uid]['items'] = [{
+                'name': i['name'],
+                'qty': i.get('qty', 0),
+                'price': 0,
+                'purchase': 0,
+                'delivery_factory': 0,
+                'dimensions': '',
+                'dims': (0, 0, 0),
+                'boxes': 1
+            } for i in order['items'] if i.get('name')]
 
 async def f_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1514,11 +1536,24 @@ async def save_to_notion(update, context, uid):
                     properties[field_name] = {"number": float(value) if value else 0}
         
         if properties:
-            result = notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=properties)
-            page_id = result.get('id', '')
+            # Проверяем, есть ли ID страницы для обновления
+            existing_page_id = orders[uid].get('notion_page_id')
+            
+            if existing_page_id:
+                # Обновляем существующую запись
+                result = notion.pages.update(page_id=existing_page_id, properties=properties)
+                page_id = existing_page_id
+                action = "Обновлено"
+            else:
+                # Создаём новую запись
+                result = notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=properties)
+                page_id = result.get('id', '')
+                orders[uid]['notion_page_id'] = page_id  # Сохраняем ID для следующих обновлений
+                action = "Сохранено"
+            
             # Собираем URL вручную, так как API может не возвращать его
             page_url = f"https://notion.so/{page_id.replace('-', '')}"
-            logger.info(f"✅ Сохранено в Notion: {order_code} - {page_url}")
+            logger.info(f"✅ {action} в Notion: {order_code} - {page_url}")
             return page_url
         else:
             logger.warning("⚠️ Нет подходящих полей в Notion для сохранения")
