@@ -971,16 +971,17 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode='HTML'
                     )
                 else:
+                    # Проверяем, есть ли запись в Notion по коду заказа
                     await context.bot.send_message(
                         chat_id=update.effective_user.id,
-                        text="⚠️ Заказ рассчитан, но не сохранён в Notion (ошибка)",
+                        text="⚠️ Сохранение в Notion не подтверждено. Проверьте базу вручную.",
                         parse_mode='HTML'
                     )
             except Exception as e:
                 logger.error(f"Ошибка авто-сохранения в Notion: {e}")
                 await context.bot.send_message(
                     chat_id=update.effective_user.id,
-                    text=f"⚠️ Ошибка сохранения в Notion: {str(e)[:100]}",
+                    text=f"⚠️ Ошибка сохранения: {str(e)[:100]}",
                     parse_mode='HTML'
                 )
         elif orders[uid].get('notion_error'):
@@ -1515,22 +1516,19 @@ async def save_to_notion(update, context, uid):
                     properties[field_name] = {"number": float(value)}
         
         if properties:
-            notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=properties)
-            await context.bot.send_message(
-                chat_id=update.callback_query.message.chat_id,
-                text=f"✅ Сохранено в Notion: {order_code}"
-            )
+            result = notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=properties)
+            page_id = result.get('id', '')
+            # Собираем URL вручную, так как API может не возвращать его
+            page_url = f"https://notion.so/{page_id.replace('-', '')}"
+            logger.info(f"✅ Сохранено в Notion: {order_code} - {page_url}")
+            return page_url
         else:
-            await context.bot.send_message(
-                chat_id=update.callback_query.message.chat_id,
-                text=f"⚠️ Нет подходящих полей в Notion для сохранения"
-            )
+            logger.warning("⚠️ Нет подходящих полей в Notion для сохранения")
+            return None
     except Exception as e:
         logger.error(f"Notion error: {e}")
-        await context.bot.send_message(
-            chat_id=update.callback_query.message.chat_id,
-            text=f"❌ Ошибка сохранения: {str(e)[:200]}"
-        )
+        logger.error(traceback.format_exc())
+        return None
 
 # ======== /DEBUG /CANCEL ========
 
