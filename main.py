@@ -430,7 +430,7 @@ async def z_order_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}\nНачни заново /zakaz')
         return ConversationHandler.END
 
-async def show_edit_item(query, uid):
+async def show_edit_item(update_or_query, uid):
     """Показываем товар для редактирования количества"""
     try:
         idx = orders[uid]['edit_idx']
@@ -449,30 +449,45 @@ async def show_edit_item(query, uid):
             } for i in items if i['qty'] > 0]
             
             if not orders[uid]['items']:
-                await query.edit_message_text('Нет товаров с количеством > 0. Начни сначала /zakaz')
+                msg = 'Нет товаров с количеством > 0. Начни сначала /zakaz'
+                if hasattr(update_or_query, 'edit_message_text'):
+                    await update_or_query.edit_message_text(msg)
+                else:
+                    await update_or_query.message.reply_text(msg)
                 return ConversationHandler.END
             
-            await query.edit_message_text(
+            msg = (
                 f'✏️ Отредактировано: {len(orders[uid]["items"])} товаров\n\n'
                 f'Название: {orders[uid]["items"][0]["name"]}\n'
                 f'Количество: {orders[uid]["items"][0]["qty"]}\n\n'
                 f'Цена клиенту за 1 шт (CNY):'
             )
+            if hasattr(update_or_query, 'edit_message_text'):
+                await update_or_query.edit_message_text(msg)
+            else:
+                await update_or_query.message.reply_text(msg)
             orders[uid]['current'] = orders[uid]['items'][0]
             orders[uid]['item_idx'] = 0
             return Z_PRICE
         
         item = items[idx]
-        await query.edit_message_text(
+        msg = (
             f'✏️ Товар {idx+1}/{len(items)}: <b>{item["name"]}</b>\n'
             f'Текущее количество: {item["qty"]}\n\n'
-            f'Введи новое количество (или 0 чтобы убрать):',
-            parse_mode='HTML'
+            f'Введи новое количество (или 0 чтобы убрать):'
         )
+        if hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(msg, parse_mode='HTML')
+        else:
+            await update_or_query.message.reply_text(msg, parse_mode='HTML')
         return Z_EDIT_ITEM_QTY
     except Exception as e:
         logger.error(f"Ошибка в show_edit_item: {e}")
-        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        msg = f'❌ Ошибка: {str(e)[:100]}'
+        if hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(msg)
+        else:
+            await update_or_query.message.reply_text(msg)
         return ConversationHandler.END
 
 async def z_edit_item_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
