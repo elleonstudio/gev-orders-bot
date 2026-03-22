@@ -813,70 +813,96 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_price = sum(i['price'] * i['qty'] for i in items)
         
         if data == 'z_comm_3':
-            commission = int(base_amd * 0.03)
-            orders[uid]['commission'] = commission
-            orders[uid]['commission_type'] = '3%'
+            commission_type = '3%'
         elif data == 'z_comm_5':
-            commission = int(base_amd * 0.05)
-            orders[uid]['commission'] = commission
-            orders[uid]['commission_type'] = '5%'
+            commission_type = '5%'
         elif data == 'z_comm_10000':
-            commission = 10000
-            orders[uid]['commission'] = commission
-            orders[uid]['commission_type'] = '10000'
+            commission_type = '10000'
         elif data == 'z_comm_15000':
-            commission = 15000
-            orders[uid]['commission'] = commission
-            orders[uid]['commission_type'] = '15000'
+            commission_type = '15000'
         
-        commission = orders[uid]['commission']
+        orders[uid]['commission_type'] = commission_type
+        
+        # === ПРАВИЛЬНЫЙ РАСЧЁТ ===
+        # 1. Товар + Доставка в CNY
+        total_cny = total_price + delivery
+        
+        # 2. Комиссия считается в CNY!
+        if commission_type == '3%':
+            commission_cny = int(total_cny * 0.03)
+        elif commission_type == '5%':
+            commission_cny = int(total_cny * 0.05)
+        elif commission_type == '10000':
+            # Фикс 10000 AMD → переводим в CNY
+            commission_cny = int(10000 / client_rate)
+        elif commission_type == '15000':
+            commission_cny = int(15000 / client_rate)
+        
+        orders[uid]['commission_cny'] = commission_cny
+        orders[uid]['commission_amd'] = int(commission_cny * client_rate)
+        
+        # 3. Итог в CNY с комиссией
+        total_with_commission_cny = total_cny + commission_cny
+        orders[uid]['total_cny'] = total_cny
+        orders[uid]['total_with_commission_cny'] = total_with_commission_cny
+        
+        # 4. Переводим в AMD
+        total_amd_client = int(total_with_commission_cny * client_rate)
+        orders[uid]['total_amd'] = total_amd_client
+        
         client_name = orders[uid]['client']
         
-        # === ПИСЬМО ДЛЯ КЛИЕНТА (с детальным расчётом) ===
+        # === ПИСЬМО ДЛЯ КЛИЕНТА (с правильным расчётом) ===
         client_msg = f"📋 <b>Расчёт заказа</b>\n"
         client_msg += f"Клиент: <b>{client_name}</b>\n\n"
         
         # Детализация по каждому товару
         for i in items:
             item_price = i['price']
-            item_delivery = i.get('delivery_factory', 0)
             item_qty = int(i['qty'])
-            item_subtotal = (item_price + item_delivery) * item_qty
+            item_subtotal = item_price * item_qty
             
             client_msg += f"<b>{i['name']}</b>\n"
-            client_msg += f"  {item_qty} × ({fmt(item_price)}¥ + {fmt(item_delivery)}¥) = {fmt(item_subtotal)}¥\n\n"
-        
-        total_cny = total_price + delivery
-        subtotal_amd = int(total_cny * client_rate)
-        total_amd_client = subtotal_amd + commission
+            client_msg += f"  {item_qty} × {fmt(item_price)}¥ = {fmt(item_subtotal)}¥\n\n"
         
         client_msg += f"━━━━━━━━━━━━\n"
         client_msg += f"Товар: {fmt(total_price)}¥\n"
         client_msg += f"Доставка: {fmt(delivery)}¥\n"
         client_msg += f"━━━━━━━━━━━━\n"
         client_msg += f"Итого: {fmt(total_cny)}¥\n"
+        client_msg += f"+ Комиссия ({commission_type}): {fmt(commission_cny)}¥\n"
         client_msg += f"━━━━━━━━━━━━\n"
-        client_msg += f"× Курс {client_rate} = {subtotal_amd:,} AMD\n"
-        client_msg += f"+ Комиссия ({orders[uid]['commission_type']}) = {commission:,} AMD\n"
+        client_msg += f"Всего: {fmt(total_with_commission_cny)}¥\n"
+        client_msg += f"× Курс {client_rate} = <b>{total_amd_client:,} AMD</b>\n"
         client_msg += f"━━━━━━━━━━━━\n"
         client_msg += f"<b>К ОПЛАТЕ: {total_amd_client:,} AMD</b>\n"
         client_msg += f"━━━━━━━━━━━━"
         
         # === ПИСЬМО ДЛЯ СЕБЯ (детальное) ===
         order_code = get_code(orders[uid]['client'])
-        margin = base_amd - real_amd  # Разница между курсом клиента и реальным
-        profit = commission + margin
+        commission_amd = orders[uid].get('commission_amd', int(commission_cny * client_rate))
+        
+        # Моя закупка (по реальному курсу)
+        purchase_amd = int((total_purchase + delivery) * real_rate)
+        
+        # Я получаю от клиента
+        received_amd = total_amd_client
+        
+        # Моя прибыль
+        profit = received_amd - purchase_amd
         
         my_msg = f"💼 <b>МОЙ РАСЧЁТ: {order_code}</b>\n\n"
         my_msg += f"<b>На закупку:</b>\n"
-        my_msg += f"  • CNY: {fmt(total_purchase + delivery)}¥\n"
-        my_msg += f"  • AMD (курс {real_rate}): {real_amd:,} AMD\n\n"
-        my_msg += f"<b>По курсу клиента ({client_rate}):</b>\n"
-        my_msg += f"  • {base_amd:,} AMD\n\n"
-        my_msg += f"<b>Доход:</b>\n"
-        my_msg += f"  • Маржа курса: {margin:,} AMD\n"
-        my_msg += f"  • Комиссия ({orders[uid]['commission_type']}): {commission:,} AMD\n"
-        my_msg += f"  • <b>Итого прибыль: {profit:,} AMD</b>\n\n"
+        my_msg += f"  • Товар: {fmt(total_purchase)}¥\n"
+        my_msg += f"  • Доставка: {fmt(delivery)}¥\n"
+        my_msg += f"  • Итого: {fmt(total_purchase + delivery)}¥ × {real_rate} = {purchase_amd:,} AMD\n\n"
+        
+        my_msg += f"<b>От клиента ({client_rate}):</b>\n"
+        my_msg += f"  • Товар+доставка: {fmt(total_cny)}¥ × {client_rate} = {int(total_cny * client_rate):,} AMD\n"
+        my_msg += f"  • Комиссия ({commission_type}): {fmt(commission_cny)}¥ × {client_rate} = {commission_amd:,} AMD\n"
+        my_msg += f"  • <b>Итого: {received_amd:,} AMD</b>\n\n"
+        
+        my_msg += f"<b>Прибыль:</b> {received_amd:,} - {purchase_amd:,} = <b>{profit:,} AMD</b>\n\n"
         
         # Инвойс
         invoice_needed = orders[uid].get('invoice_needed', False)
@@ -887,7 +913,7 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             my_msg += f"📄 Инвойс: Нет\n\n"
         
-        my_msg += f"💵 <b>Прибыль чистая:</b> {profit:,} AMD"
+        my_msg += f"💵 <b>Чистая прибыль:</b> {profit:,} AMD"
         
         # Отправляем оба письма
         await query.edit_message_text(client_msg, parse_mode='HTML')
@@ -911,6 +937,42 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=next_steps,
             parse_mode='HTML'
         )
+        
+        # === АВТО-СОХРАНЕНИЕ В NOTION ===
+        if notion and NOTION_DATABASE_ID and not orders[uid].get('notion_error'):
+            try:
+                notion_url = await save_to_notion(update, context, uid)
+                if notion_url:
+                    await context.bot.send_message(
+                        chat_id=update.effective_user.id,
+                        text=f"✅ Сохранено в Notion:\n{notion_url}",
+                        parse_mode='HTML'
+                    )
+                else:
+                    await context.bot.send_message(
+                        chat_id=update.effective_user.id,
+                        text="⚠️ Заказ рассчитан, но не сохранён в Notion (ошибка)",
+                        parse_mode='HTML'
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка авто-сохранения в Notion: {e}")
+                await context.bot.send_message(
+                    chat_id=update.effective_user.id,
+                    text=f"⚠️ Ошибка сохранения в Notion: {str(e)[:100]}",
+                    parse_mode='HTML'
+                )
+        elif orders[uid].get('notion_error'):
+            await context.bot.send_message(
+                chat_id=update.effective_user.id,
+                text="⚠️ Заказ не сохранён в Notion (был недоступен при старте)",
+                parse_mode='HTML'
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=update.effective_user.id,
+                text="⚠️ Notion не настроен — заказ не сохранён", 
+                parse_mode='HTML'
+            )
         
         save_session()
         return ConversationHandler.END
@@ -1374,15 +1436,25 @@ async def save_to_notion(update, context, uid):
         client_rate = data.get('client_rate', 58)
         real_rate = data.get('real_rate', 55)
         rub_rate = data.get('rub_rate', 5.8)
-        commission = data.get('commission', 0)
+        
+        # Новые поля с правильным расчётом
+        commission_cny = data.get('commission_cny', 0)
+        commission_amd = data.get('commission_amd', 0)
+        total_cny = data.get('total_cny', 0)
+        total_with_commission_cny = data.get('total_with_commission_cny', 0)
+        total_amd = data.get('total_amd', 0)
+        
         fillx_total = data.get('fillx_total', 0)
         fillx_amd = data.get('fillx_amd', 0)
         
         ff_amd = int(ff_total * real_rate) if ff_total else 0
         purchase_amd = int((total_purchase + delivery_factory) * real_rate)
-        client_total_amd = int((total_price + ff_total) * client_rate)
-        total_costs = purchase_amd + ff_amd + fillx_amd + commission
-        profit = client_total_amd - total_costs
+        
+        # Общие расходы (закупка + FF + FILLX)
+        total_costs = purchase_amd + ff_amd + fillx_amd
+        
+        # Прибыль = что получили от клиента - расходы
+        profit = total_amd - total_costs
         
         properties = {}
         
@@ -1399,10 +1471,13 @@ async def save_to_notion(update, context, uid):
             "Курс ₽→драм": ("number", float(rub_rate)),
             "Закупка реальная (AMD)": ("number", purchase_amd),
             "Прибыль (AMD)": ("number", profit),
+            "К ОПЛАТЕ (AMD)": ("number", total_amd),
             "FF Итого (CNY)": ("number", ff_total),
             "FF Итого (AMD)": ("number", ff_amd),
             "FILLX Итого (₽)": ("number", fillx_total),
             "FILLX Итого (AMD)": ("number", fillx_amd),
+            "Комиссия (CNY)": ("number", commission_cny),
+            "Комиссия (AMD)": ("number", commission_amd),
             "Статус": ("select", "Новый"),
         }
         
