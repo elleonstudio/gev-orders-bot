@@ -1002,8 +1002,71 @@ F_SELECT_ORDER, F_PACKAGES, F_PACKAGE_PRICE, F_WORK, F_THERMAL = range(5)
 async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     
+    # Если передано имя клиента — ищем в базе как /zakaz
+    if context.args:
+        client_name = ' '.join(context.args)
+        
+        # Получаем заказы клиента
+        client_orders, error = await get_client_orders_from_notion(client_name)
+        
+        if client_orders is None:
+            # Ошибка при получении
+            logger.error(f"Ошибка получения заказов: {error}")
+            await update.message.reply_text(
+                f'⚠️ Notion временно недоступен.\n'
+                f'Для нового заказа сначала выполни /zakaz {client_name}'
+            )
+            return ConversationHandler.END
+        
+        # Инициализируем сессию
+        orders[uid] = {
+            'client': client_name,
+            'items': [],
+            'type': 'ff',
+            'all_client_orders': client_orders
+        }
+        
+        if client_orders:
+            # Показываем список заказов
+            keyboard = []
+            for idx, order in enumerate(client_orders[:5]):
+                items_list = order.get('items', [])
+                if items_list:
+                    items_names = [i['name'][:12] for i in items_list[:3] if i.get('name')]
+                    items_desc = ", ".join(items_names)
+                    if len(items_list) > 3:
+                        items_desc += f" +{len(items_list)-3}"
+                else:
+                    items_desc = order.get('items_text', 'Товар')[:25]
+                
+                btn_text = f"📦 {items_desc}"
+                keyboard.append([InlineKeyboardButton(btn_text, callback_data=f'sel_order_{idx}')])
+            
+            keyboard.append([InlineKeyboardButton("➕ Новый заказ", callback_data='sel_order_new')])
+            
+            await update.message.reply_text(
+                f'📦 FF Китай\nКлиент: <b>{client_name}</b>\n'
+                f'Найдено заказов: {len(client_orders)}\n\n'
+                f'Выбери заказ или создай новый:',
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+            return F_SELECT_ORDER
+        else:
+            # Новый клиент
+            await update.message.reply_text(
+                f'Клиент: <b>{client_name}</b>\n'
+                f'В базе заказов не найдено.\n\n'
+                f'Для нового заказа сначала выполни /zakaz {client_name}'
+            )
+            return ConversationHandler.END
+    
+    # Без аргументов — работаем как раньше (нужен предыдущий /zakaz)
     if uid not in orders or not orders[uid].get('items'):
-        await update.message.reply_text('Сначала выполни /zakaz [имя клиента]')
+        await update.message.reply_text(
+            'Сначала выполни /zakaz [имя клиента]\n\n'
+            'Или сразу: /ff [имя клиента]'
+        )
         return ConversationHandler.END
     
     result = await show_order_selection(update, context, uid, F_SELECT_ORDER)
@@ -1106,7 +1169,16 @@ async def f_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             items_summary = order.get('items_text', 'Товар')[:40]
         
-        await query.edit_message_text(f'Выбрано: {items_summary}')
+        # Проверяем, есть ли товары с размерами
+        if not orders[uid].get('items') or not any(i.get('dims', (0,0,0))[0] > 0 for i in orders[uid]['items']):
+            await query.edit_message_text(
+                f'⚠️ Выбрано: {items_summary}\n\n'
+                f'В заказе нет размеров товаров.\n'
+                f'Нужно пересчитать через /zakaz {orders[uid]["client"]}'
+            )
+            return ConversationHandler.END
+        
+        await query.edit_message_text(f'📦 FF: {items_summary}')
         await start_ff(update, context, uid)
         return F_PACKAGES
     except Exception as e:
@@ -1309,8 +1381,68 @@ D_SELECT_ORDER, D_WAREHOUSE, D_BOXES, D_MORE_WH, D_RUB_RATE, D_CRATING = range(6
 async def cmd_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     
+    # Если передано имя клиента — ищем в базе как /zakaz
+    if context.args:
+        client_name = ' '.join(context.args)
+        
+        # Получаем заказы клиента
+        client_orders, error = await get_client_orders_from_notion(client_name)
+        
+        if client_orders is None:
+            await update.message.reply_text(
+                f'⚠️ Notion временно недоступен.\n'
+                f'Для нового заказа сначала выполни /zakaz {client_name}'
+            )
+            return ConversationHandler.END
+        
+        # Инициализируем сессию
+        orders[uid] = {
+            'client': client_name,
+            'items': [],
+            'type': 'dostavka',
+            'all_client_orders': client_orders
+        }
+        
+        if client_orders:
+            # Показываем список заказов
+            keyboard = []
+            for idx, order in enumerate(client_orders[:5]):
+                items_list = order.get('items', [])
+                if items_list:
+                    items_names = [i['name'][:12] for i in items_list[:3] if i.get('name')]
+                    items_desc = ", ".join(items_names)
+                    if len(items_list) > 3:
+                        items_desc += f" +{len(items_list)-3}"
+                else:
+                    items_desc = order.get('items_text', 'Товар')[:25]
+                
+                btn_text = f"📦 {items_desc}"
+                keyboard.append([InlineKeyboardButton(btn_text, callback_data=f'sel_order_{idx}')])
+            
+            keyboard.append([InlineKeyboardButton("➕ Новый заказ", callback_data='sel_order_new')])
+            
+            await update.message.reply_text(
+                f'🚚 FILLX Доставка РФ\nКлиент: <b>{client_name}</b>\n'
+                f'Найдено заказов: {len(client_orders)}\n\n'
+                f'Выбери заказ:',
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+            return D_SELECT_ORDER
+        else:
+            await update.message.reply_text(
+                f'Клиент: <b>{client_name}</b>\n'
+                f'В базе заказов не найдено.\n\n'
+                f'Для нового заказа сначала выполни /zakaz {client_name}'
+            )
+            return ConversationHandler.END
+    
+    # Без аргументов — работаем как раньше
     if uid not in orders or not orders[uid].get('items'):
-        await update.message.reply_text('Сначала выполни /zakaz [имя клиента]')
+        await update.message.reply_text(
+            'Сначала выполни /zakaz [имя клиента]\n\n'
+            'Или сразу: /dostavka [имя клиента]'
+        )
         return ConversationHandler.END
     
     result = await show_order_selection(update, context, uid, D_SELECT_ORDER)
