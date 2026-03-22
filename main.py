@@ -725,14 +725,19 @@ async def z_more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     
     try:
+        current = orders[uid]['current']
+        items = orders[uid]['items']
+        
+        # Проверяем, нет ли уже такого товара в списке (по имени)
+        existing_names = [i['name'] for i in items]
+        if current.get('name') not in existing_names:
+            items.append(current)
+        
         if query.data == 'z_more_yes':
-            orders[uid]['items'].append(orders[uid]['current'])
             orders[uid]['current'] = {}
             await query.edit_message_text('Название товара:')
             return Z_NAME
         else:
-            orders[uid]['items'].append(orders[uid]['current'])
-            
             if 'client_rate' in orders[uid]:
                 await query.edit_message_text(
                     f'Курс клиенту ¥→драм ({orders[uid]["client_rate"]}):\n(отправь новое число или "ok")'
