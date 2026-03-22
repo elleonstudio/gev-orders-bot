@@ -830,9 +830,11 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             orders[uid]['commission_type'] = '15000'
         
         commission = orders[uid]['commission']
+        client_name = orders[uid]['client']
         
         # === ПИСЬМО ДЛЯ КЛИЕНТА (с детальным расчётом) ===
-        client_msg = f"📋 <b>Расчёт заказа</b>\n\n"
+        client_msg = f"📋 <b>Расчёт заказа</b>\n"
+        client_msg += f"Клиент: <b>{client_name}</b>\n\n"
         
         # Детализация по каждому товару
         for i in items:
