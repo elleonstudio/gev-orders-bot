@@ -177,7 +177,12 @@ async def get_client_orders_from_notion(client_name):
             orders_list.append(order)
         return orders_list, None
     except Exception as e:
-        error_msg = f"{type(e).__name__}: {str(e)}"
+        error_str = str(e)
+        # Если клиент не найден в списке select — возвращаем пустой список
+        if 'select option' in error_str and 'not found' in error_str:
+            logger.info(f"Клиент '{client_name}' не найден в списке Notion — создаём нового")
+            return [], None  # Пустой список = новый клиент
+        error_msg = f"{type(e).__name__}: {error_str}"
         logger.error(f"Error fetching client orders: {error_msg}")
         logger.error(traceback.format_exc())
         return None, error_msg
@@ -270,8 +275,8 @@ async def cmd_zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'notion_error': error
         }
         await update.message.reply_text(
-            f'⚠️ Ошибка чтения базы: {error[:100]}...\n\n'
-            f'Работаю в автономном режиме.\n\n'
+            f'⚠️ <b>Notion временно недоступен</b>\n\n'
+            f'Работаю в автономном режиме (расчёты работают, но не сохраняются).\n\n'
             f'Клиент: <b>{client_name}</b>\n'
             f'Название товара:',
             parse_mode='HTML'
