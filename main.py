@@ -288,9 +288,11 @@ async def cmd_zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Формируем описание товаров вместо даты
                 items_list = order.get('items', [])
                 if items_list:
-                    items_desc = ", ".join([f"{i['name'][:10]}×{i.get('qty', 0)}" for i in items_list[:2] if i.get('name')])
-                    if len(items_list) > 2:
-                        items_desc += f" +{len(items_list)-2}"
+                    # Показываем только названия товаров (количество в Notion не хранится отдельно)
+                    items_names = [i['name'][:12] for i in items_list[:3] if i.get('name')]
+                    items_desc = ", ".join(items_names)
+                    if len(items_list) > 3:
+                        items_desc += f" +{len(items_list)-3}"
                 else:
                     items_desc = order.get('items_text', 'Товар')[:25]
                 
@@ -356,13 +358,13 @@ async def z_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = orders[uid]['all_client_orders'][order_idx]
         items = order.get('items', [])
         
-        # Формируем описание товаров для заголовка
+        # Формируем описание товаров для заголовка (без количества)
         if items:
-            items_summary = ", ".join([f"{i['name']}×{i.get('qty', 0)}" for i in items[:2] if i.get('name')])
-            if len(items) > 2:
-                items_summary += f" +{len(items)-2}"
+            items_summary = ", ".join([i['name'] for i in items[:3] if i.get('name')])
+            if len(items) > 3:
+                items_summary += f" +{len(items)-3}"
         else:
-            items_summary = order.get('items_text', 'Товар')[:30]
+            items_summary = order.get('items_text', 'Товар')[:40]
         
         items_text = "\n".join([f"• {i['name']} × {i['qty']}" for i in items if i['name']])
         
@@ -1036,10 +1038,11 @@ async def show_order_selection(update: Update, context: ContextTypes.DEFAULT_TYP
         # Формируем понятное описание товаров
         items_list = order.get('items', [])
         if items_list:
-            # Показываем первые 2 товара с количеством
-            items_desc = ", ".join([f"{i['name'][:10]}×{i.get('qty', 0)}" for i in items_list[:2] if i.get('name')])
-            if len(items_list) > 2:
-                items_desc += f" +{len(items_list)-2}"
+            # Показываем только названия (без количества, т.к. в Notion его нет)
+            items_names = [i['name'][:12] for i in items_list[:3] if i.get('name')]
+            items_desc = ", ".join(items_names)
+            if len(items_list) > 3:
+                items_desc += f" +{len(items_list)-3}"
         else:
             items_desc = order.get('items_text', 'Товар')[:25]
         
@@ -1097,11 +1100,11 @@ async def f_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = orders[uid]['all_client_orders'][order_idx]
         items_list = order.get('items', [])
         if items_list:
-            items_summary = ", ".join([f"{i['name']}×{i.get('qty', 0)}" for i in items_list[:2] if i.get('name')])
-            if len(items_list) > 2:
-                items_summary += f" +{len(items_list)-2}"
+            items_summary = ", ".join([i['name'] for i in items_list[:3] if i.get('name')])
+            if len(items_list) > 3:
+                items_summary += f" +{len(items_list)-3}"
         else:
-            items_summary = order.get('items_text', 'Товар')[:30]
+            items_summary = order.get('items_text', 'Товар')[:40]
         
         await query.edit_message_text(f'Выбрано: {items_summary}')
         await start_ff(update, context, uid)
@@ -1148,25 +1151,22 @@ async def show_ff_package(update_or_query, context, uid):
     l, w, h = item['dims']
     qty = item['qty']
     
+    # Получаем все пакеты из Notion для ручного выбора
     packages = await get_packages_from_notion()
-    best_pkg = find_best_package(packages, l, w, h)
+    orders[uid]['ff_available_packages'] = packages  # Сохраняем для callback
     
     msg = f"📦 Товар {idx+1}/{len(items)}: <b>{item['name']}</b>\n"
-    msg += f"📐 Размеры: {int(l)}×{int(w)}×{int(h)} см\n"
-    msg += f"📦 Коробок: {item['boxes']}\n\n"
+    msg += f"📐 Размеры: {int(l)}×{int(w)}×{int(h)} см | Кол-во: {qty} шт\n\n"
+    msg += f"<b>Выбери пакет из базы:</b>"
     
-    if best_pkg:
-        pkg_total = best_pkg['price'] * qty
-        orders[uid]['ff_packages'][idx] = {'pkg': best_pkg, 'total': pkg_total, 'qty': qty}
-        msg += f"📦 Пакет: {best_pkg['name']}\n"
-        msg += f"   {best_pkg['price']} ¥ × {qty} = {fmt(pkg_total)} ¥\n\n"
-        keyboard = [
-            [InlineKeyboardButton("✅ OK", callback_data='f_pkg_ok')],
-            [InlineKeyboardButton("💬 Своя цена", callback_data='f_pkg_custom')]
-        ]
-    else:
-        msg += "⚠️ Пакет не найден\n\n"
-        keyboard = [[InlineKeyboardButton("💬 Ввести цену", callback_data='f_pkg_custom')]]
+    # Создаём кнопки для всех пакетов
+    keyboard = []
+    for pkg_idx, pkg in enumerate(packages):
+        btn_text = f"📦 {pkg['name']} — {pkg['price']}¥ ({int(pkg['l'])}×{int(pkg['w'])}×{int(pkg['h'])}см)"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f'f_pkg_select_{pkg_idx}')])
+    
+    # Кнопка для своей цены
+    keyboard.append([InlineKeyboardButton("💰 Своя цена", callback_data='f_pkg_custom')])
     
     if hasattr(update_or_query, 'edit_message_text'):
         await update_or_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
@@ -1179,12 +1179,38 @@ async def f_package_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     data = query.data
     
-    if data == 'f_pkg_ok':
-        orders[uid]['ff_index'] += 1
-        result = await show_ff_package(update, context, uid)  # Передаём update, не query
-        if result == F_WORK:
-            return F_WORK
-        return F_PACKAGES
+    if data.startswith('f_pkg_select_'):
+        # Пользователь выбрал конкретный пакет из списка
+        pkg_idx = int(data.replace('f_pkg_select_', ''))
+        packages = orders[uid].get('ff_available_packages', [])
+        
+        if pkg_idx < len(packages):
+            selected_pkg = packages[pkg_idx]
+            idx = orders[uid]['ff_index']
+            items = orders[uid]['items']
+            qty = items[idx]['qty']
+            
+            pkg_total = selected_pkg['price'] * qty
+            orders[uid]['ff_packages'][idx] = {
+                'pkg': selected_pkg, 
+                'total': pkg_total, 
+                'qty': qty
+            }
+            
+            # Подтверждаем выбор и переходим к следующему товару
+            await query.edit_message_text(
+                f"✅ Выбран: <b>{selected_pkg['name']}</b>\n"
+                f"   {selected_pkg['price']}¥ × {qty} = {fmt(pkg_total)}¥"
+            )
+            
+            orders[uid]['ff_index'] += 1
+            result = await show_ff_package(update, context, uid)
+            if result == F_WORK:
+                return F_WORK
+            return F_PACKAGES
+        else:
+            await query.edit_message_text('❌ Ошибка: пакет не найден')
+            return F_PACKAGES
     elif data == 'f_pkg_custom':
         await query.edit_message_text('Введи цену пакетов (¥):')
         return F_PACKAGE_PRICE
@@ -1324,11 +1350,11 @@ async def d_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order = orders[uid]['all_client_orders'][order_idx]
         items_list = order.get('items', [])
         if items_list:
-            items_summary = ", ".join([f"{i['name']}×{i.get('qty', 0)}" for i in items_list[:2] if i.get('name')])
-            if len(items_list) > 2:
-                items_summary += f" +{len(items_list)-2}"
+            items_summary = ", ".join([i['name'] for i in items_list[:3] if i.get('name')])
+            if len(items_list) > 3:
+                items_summary += f" +{len(items_list)-3}"
         else:
-            items_summary = order.get('items_text', 'Товар')[:30]
+            items_summary = order.get('items_text', 'Товар')[:40]
         
         await query.edit_message_text(f'Выбрано: {items_summary}')
         await start_dostavka(update, context, uid)
@@ -1625,7 +1651,7 @@ def main():
         entry_points=[CommandHandler('ff', cmd_ff)],
         states={
             F_SELECT_ORDER: [CallbackQueryHandler(f_select_order_cb, pattern='^sel_order_')],
-            F_PACKAGES: [CallbackQueryHandler(f_package_cb, pattern='^f_')],
+            F_PACKAGES: [CallbackQueryHandler(f_package_cb, pattern='^f_pkg_select_|^f_pkg_custom$')],
             F_PACKAGE_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, f_package_price)],
             F_WORK: [MessageHandler(filters.TEXT & ~filters.COMMAND, f_work)],
             F_THERMAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, f_thermal)],
