@@ -153,16 +153,38 @@ async def get_client_orders_from_notion(client_name):
             for item_str in items_text.split(';'):
                 item_str = item_str.strip()
                 if item_str:
+                    # Пробуем разные форматы: "Name × 100", "Name x 100", "Name 100"
+                    name = item_str
+                    qty = 0
+                    
+                    # Ищем × ( multiplication sign)
                     if '×' in item_str:
                         parts = item_str.rsplit('×', 1)
                         name = parts[0].strip()
                         try:
-                            qty = int(parts[1].strip())
+                            qty = int(parts[1].strip().split()[0])  # Берём только число
                         except:
                             qty = 0
+                    # Ищем x (латинская)
+                    elif ' x ' in item_str.lower():
+                        parts = item_str.lower().rsplit(' x ', 1)
+                        name = item_str[:item_str.lower().rfind(' x ')].strip()
+                        try:
+                            qty = int(parts[1].strip().split()[0])
+                        except:
+                            qty = 0
+                    # Пробуем взять последнее число как количество
                     else:
-                        name = item_str
-                        qty = 0
+                        import re
+                        numbers = re.findall(r'\d+', item_str)
+                        if numbers:
+                            try:
+                                qty = int(numbers[-1])
+                                # Убираем число из названия
+                                name = re.sub(r'\s*\d+\s*$', '', item_str).strip()
+                            except:
+                                qty = 0
+                    
                     # Пропускаем дубликаты по названию
                     if name and name not in seen_names:
                         seen_names.add(name)
