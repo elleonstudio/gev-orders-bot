@@ -225,7 +225,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ======== /ZAKAZ ========
 
-Z_SELECT_ORDER, Z_ORDER_ACTION, Z_SELECT_ITEMS, Z_EDIT_ITEM_QTY, Z_NAME, Z_QTY, Z_PRICE, Z_PURCHASE, Z_DELIVERY, Z_DIMS, Z_MORE, Z_CLIENT_RATE, Z_REAL_RATE, Z_COMMISSION = range(14)
+Z_INVOICE, Z_SELECT_ORDER, Z_ORDER_ACTION, Z_SELECT_ITEMS, Z_EDIT_ITEM_QTY, Z_NAME, Z_QTY, Z_PRICE, Z_PURCHASE, Z_DELIVERY, Z_DIMS, Z_MORE, Z_CLIENT_RATE, Z_REAL_RATE, Z_COMMISSION = range(15)
 
 async def cmd_zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/zakaz [имя] — новый заказ или работа с существующим"""
@@ -310,13 +310,19 @@ async def cmd_zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return Z_SELECT_ORDER
     else:
+        # Новый клиент без заказов — спрашиваем про инвойс
+        keyboard = [
+            [InlineKeyboardButton("✅ Да, нужен инвойс", callback_data='z_invoice_yes')],
+            [InlineKeyboardButton("❌ Нет, без инвойса", callback_data='z_invoice_no')]
+        ]
         await update.message.reply_text(
             f'Клиент: <b>{client_name}</b>\n'
             f'В базе заказов не найдено.\n\n'
-            f'Название товара:',
+            f'Нужен инвойс (+10%)?',
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='HTML'
         )
-        return Z_NAME
+        return Z_INVOICE
 
 async def z_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -324,12 +330,17 @@ async def z_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     
     if query.data == 'z_sel_new':
+        # Новый заказ — спрашиваем про инвойс
+        keyboard = [
+            [InlineKeyboardButton("✅ Да, нужен инвойс", callback_data='z_invoice_yes')],
+            [InlineKeyboardButton("❌ Нет, без инвойса", callback_data='z_invoice_no')]
+        ]
         await query.edit_message_text(
             f'➕ Новый заказ для <b>{orders[uid]["client"]}</b>\n\n'
-            f'Название товара:',
-            parse_mode='HTML'
+            f'Нужен инвойс (+10%)?',
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return Z_NAME
+        return Z_INVOICE
     
     # Выбрали существующий заказ
     try:
@@ -381,7 +392,12 @@ async def z_order_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         items = order.get('items', [])
         
-        if action == 'z_act_template':
+        elif action == 'z_act_template':
+            # Использовать как шаблон — спрашиваем про инвойс
+            keyboard = [
+                [InlineKeyboardButton("✅ Да, нужен инвойс", callback_data='z_invoice_yes')],
+                [InlineKeyboardButton("❌ Нет, без инвойса", callback_data='z_invoice_no')]
+            ]
             rates_text = []
             if orders[uid].get('client_rate'):
                 rates_text.append(f"клиент {orders[uid]['client_rate']}")
@@ -391,9 +407,10 @@ async def z_order_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f'📝 Шаблон: {len(items)} товаров\n'
                 f'Курсы: {", ".join(rates_text) if rates_text else "нет"}\n\n'
-                f'Название товара:'
+                f'Нужен инвойс (+10%)?',
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
-            return Z_NAME
+            return Z_INVOICE
         
         elif action == 'z_act_edit':
             orders[uid]['edit_items'] = items.copy()
@@ -428,6 +445,25 @@ async def z_order_action_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка в z_order_action_cb: {e}")
         logger.error(traceback.format_exc())
         await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}\nНачни заново /zakaz')
+        return ConversationHandler.END
+
+async def z_invoice_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора инвойса"""
+    query = update.callback_query
+    await query.answer()
+    uid = str(update.effective_user.id)
+    
+    try:
+        if query.data == 'z_invoice_yes':
+            orders[uid]['invoice_needed'] = True
+        else:
+            orders[uid]['invoice_needed'] = False
+        
+        await query.edit_message_text('Название товара:')
+        return Z_NAME
+    except Exception as e:
+        logger.error(f"Ошибка в z_invoice_cb: {e}")
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
         return ConversationHandler.END
 
 async def show_edit_item(update_or_query, uid):
@@ -768,48 +804,117 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         items = orders[uid]['items']
         client_rate = orders[uid]['client_rate']
+        real_rate = orders[uid].get('real_rate', client_rate - 3)  # Реальный курс (обычно на 3 меньше)
         total_purchase = sum(i['purchase'] * i['qty'] for i in items)
         delivery = sum(i.get('delivery_factory', 0) for i in items)
         
         base_amd = int((total_purchase + delivery) * client_rate)
+        real_amd = int((total_purchase + delivery) * real_rate)
         total_price = sum(i['price'] * i['qty'] for i in items)
         
         if data == 'z_comm_3':
-            orders[uid]['commission'] = int(base_amd * 0.03)
+            commission = int(base_amd * 0.03)
+            orders[uid]['commission'] = commission
             orders[uid]['commission_type'] = '3%'
         elif data == 'z_comm_5':
-            orders[uid]['commission'] = int(base_amd * 0.05)
+            commission = int(base_amd * 0.05)
+            orders[uid]['commission'] = commission
             orders[uid]['commission_type'] = '5%'
         elif data == 'z_comm_10000':
-            orders[uid]['commission'] = 10000
+            commission = 10000
+            orders[uid]['commission'] = commission
             orders[uid]['commission_type'] = '10000'
         elif data == 'z_comm_15000':
-            orders[uid]['commission'] = 15000
+            commission = 15000
+            orders[uid]['commission'] = commission
             orders[uid]['commission_type'] = '15000'
         
         commission = orders[uid]['commission']
         
-        msg = f"📊 <b>Расчёт закупки</b>\n\n"
+        # === ПИСЬМО ДЛЯ КЛИЕНТА (с детальным расчётом) ===
+        client_msg = f"📋 <b>Расчёт заказа</b>\n\n"
+        
+        # Детализация по каждому товару
         for i in items:
-            msg += f"• {i['name']} × {int(i['qty'])}\n"
-        msg += f"\nТовар: {fmt(total_purchase)}¥\n"
-        msg += f"Доставка: {fmt(delivery)}¥\n"
-        msg += f"━━━━━━━━━━━━\n"
-        msg += f"В закупку: {base_amd} AMD\n"
-        msg += f"Комиссия ({orders[uid]['commission_type']}): {commission} AMD\n"
-        msg += f"<b>Итого: {base_amd + commission} AMD</b>\n\n"
-        msg += f"Для FF используй <b>/ff</b>\n"
-        msg += f"Для доставки РФ используй <b>/dostavka</b>"
+            item_price = i['price']
+            item_delivery = i.get('delivery_factory', 0)
+            item_qty = int(i['qty'])
+            item_subtotal = (item_price + item_delivery) * item_qty
+            
+            client_msg += f"<b>{i['name']}</b>\n"
+            client_msg += f"  {item_qty} × ({fmt(item_price)}¥ + {fmt(item_delivery)}¥) = {fmt(item_subtotal)}¥\n\n"
+        
+        total_cny = total_price + delivery
+        subtotal_amd = int(total_cny * client_rate)
+        total_amd_client = subtotal_amd + commission
+        
+        client_msg += f"━━━━━━━━━━━━\n"
+        client_msg += f"Товар: {fmt(total_price)}¥\n"
+        client_msg += f"Доставка: {fmt(delivery)}¥\n"
+        client_msg += f"━━━━━━━━━━━━\n"
+        client_msg += f"Итого: {fmt(total_cny)}¥\n"
+        client_msg += f"━━━━━━━━━━━━\n"
+        client_msg += f"× Курс {client_rate} = {subtotal_amd:,} AMD\n"
+        client_msg += f"+ Комиссия ({orders[uid]['commission_type']}) = {commission:,} AMD\n"
+        client_msg += f"━━━━━━━━━━━━\n"
+        client_msg += f"<b>К ОПЛАТЕ: {total_amd_client:,} AMD</b>\n"
+        client_msg += f"━━━━━━━━━━━━"
+        
+        # === ПИСЬМО ДЛЯ СЕБЯ (детальное) ===
+        order_code = get_code(orders[uid]['client'])
+        margin = base_amd - real_amd  # Разница между курсом клиента и реальным
+        profit = commission + margin
+        
+        my_msg = f"💼 <b>МОЙ РАСЧЁТ: {order_code}</b>\n\n"
+        my_msg += f"<b>На закупку:</b>\n"
+        my_msg += f"  • CNY: {fmt(total_purchase + delivery)}¥\n"
+        my_msg += f"  • AMD (курс {real_rate}): {real_amd:,} AMD\n\n"
+        my_msg += f"<b>По курсу клиента ({client_rate}):</b>\n"
+        my_msg += f"  • {base_amd:,} AMD\n\n"
+        my_msg += f"<b>Доход:</b>\n"
+        my_msg += f"  • Маржа курса: {margin:,} AMD\n"
+        my_msg += f"  • Комиссия ({orders[uid]['commission_type']}): {commission:,} AMD\n"
+        my_msg += f"  • <b>Итого прибыль: {profit:,} AMD</b>\n\n"
+        
+        # Инвойс
+        invoice_needed = orders[uid].get('invoice_needed', False)
+        if invoice_needed:
+            invoice_amount = int(total_amd_client * 0.10)
+            my_msg += f"📄 <b>Инвойс (+10%):</b> {invoice_amount:,} AMD\n"
+            my_msg += f"<b>Итого с инвойсом:</b> {total_amd_client + invoice_amount:,} AMD\n\n"
+        else:
+            my_msg += f"📄 Инвойс: Нет\n\n"
+        
+        my_msg += f"💵 <b>Прибыль чистая:</b> {profit:,} AMD"
+        
+        # Отправляем оба письма
+        await query.edit_message_text(client_msg, parse_mode='HTML')
+        await context.bot.send_message(
+            chat_id=update.effective_user.id,
+            text=my_msg,
+            parse_mode='HTML'
+        )
+        
+        # Инструкции для дальнейших шагов
+        next_steps = "\n\n<b>Дальнейшие шаги:</b>\n"
+        next_steps += "• Для FF используй /ff\n"
+        next_steps += "• Для доставки РФ используй /dostavka"
         
         # Проверяем была ли ошибка Notion
         if orders[uid].get('notion_error'):
-            msg += f"\n\n⚠️ <b>Внимание</b>: Notion недоступен, заказ не сохранится в базу!"
+            next_steps += f"\n\n⚠️ <b>Внимание</b>: Notion недоступен, заказ не сохранится в базу!"
         
-        await query.edit_message_text(msg, parse_mode='HTML')
+        await context.bot.send_message(
+            chat_id=update.effective_user.id,
+            text=next_steps,
+            parse_mode='HTML'
+        )
+        
         save_session()
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Ошибка в z_commission_cb: {e}")
+        logger.error(traceback.format_exc())
         await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
         return ConversationHandler.END
 
@@ -1381,6 +1486,7 @@ def main():
     zakaz_conv = ConversationHandler(
         entry_points=[CommandHandler('zakaz', cmd_zakaz)],
         states={
+            Z_INVOICE: [CallbackQueryHandler(z_invoice_cb, pattern='^z_invoice_')],
             Z_SELECT_ORDER: [CallbackQueryHandler(z_select_order_cb, pattern='^z_sel_')],
             Z_ORDER_ACTION: [CallbackQueryHandler(z_order_action_cb, pattern='^z_act_')],
             Z_SELECT_ITEMS: [CallbackQueryHandler(z_item_toggle_cb, pattern='^z_item_toggle_|^z_items_done$|^z_items_back$')],
