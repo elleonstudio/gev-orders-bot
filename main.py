@@ -784,7 +784,7 @@ async def z_bundle_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
 async def z_bundle_new_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Создание нового набора - ввод имени"""
+    """Создание нового набора - ввод имени, цена устанавливается в /ff"""
     uid = str(update.effective_user.id)
     try:
         bundle_name = update.message.text.strip()
@@ -792,18 +792,32 @@ async def z_bundle_new_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text('Имя не может быть пустым. Введи имя набора:')
             return Z_BUNDLE_NEW
             
-        orders[uid]['current']['bundle_name'] = bundle_name
-        orders[uid]['current']['is_bundle'] = True
-        orders[uid]['current']['dimensions'] = 'Набор'
-        orders[uid]['current']['dims'] = (0, 0, 0)
+        # Создаём "пустой" набор как контейнер
+        # Цена будет установлена в /ff при расчёте
+        orders[uid]['current'] = {
+            'name': bundle_name,
+            'bundle_name': None,  # Это сам набор, не товар в наборе
+            'is_bundle': True,
+            'dimensions': 'Набор',
+            'dims': (0, 0, 0),
+            'qty': 1,
+            'price': 0,  # Цена будет в /ff
+            'purchase': 0,
+            'delivery_factory': 0,
+            'items_per_box': 0,
+            'boxes': 0
+        }
         
-        # Пропускаем запрос размеров для набора — они будут запрошены в /ff
+        keyboard = [[InlineKeyboardButton("✅ Да", callback_data='z_more_yes'), 
+                     InlineKeyboardButton("❌ Нет", callback_data='z_more_no')]]
         await update.message.reply_text(
             f'📦 Новый набор: <b>{bundle_name}</b>\n\n'
-            f'Теперь введи цену клиенту за 1 шт (CNY):',
-            parse_mode='HTML'
+            f'Набор создан. Теперь добавь товары в этот набор.\n'
+            f'Ещё товар?',
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return Z_PRICE
+        return Z_MORE
     except Exception as e:
         logger.error(f"Ошибка в z_bundle_new_name: {e}")
         await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
@@ -884,11 +898,29 @@ async def z_more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current_key = (current['name'], current.get('bundle_name'))
             if current_key not in existing_keys:
                 items.append(current)
+                # Если это набор (контейнер), запоминаем его имя для следующих товаров
+                if current.get('is_bundle') and current.get('bundle_name') is None:
+                    orders[uid]['active_bundle'] = current['name']
+                    logger.info(f"Set active_bundle to {current['name']}")
         
         if query.data == 'z_more_yes':
             # Новый товар
-            orders[uid]['current'] = {}
-            await query.edit_message_text('Название товара:')
+            active_bundle = orders[uid].get('active_bundle')
+            if active_bundle:
+                # Если есть активный набор, создаём товар в этом наборе
+                orders[uid]['current'] = {
+                    'bundle_name': active_bundle,
+                    'is_bundle': False
+                }
+                await query.edit_message_text(
+                    f'📦 Добавляем в набор: <b>{active_bundle}</b>\n\n'
+                    f'Название товара:',
+                    parse_mode='HTML'
+                )
+            else:
+                # Обычный товар без набора
+                orders[uid]['current'] = {}
+                await query.edit_message_text('Название товара:')
             return Z_NAME
         else:
             # Закончили с товарами — идём к курсам
