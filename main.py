@@ -816,12 +816,28 @@ async def z_bundle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def z_get_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     text = update.message.text.strip()
+    logger.info(f"z_get_dims called for uid={uid}, text='{text}'")
     try:
         dims = [float(x) for x in text.split()]
         if len(dims) != 3:
-            raise ValueError
+            raise ValueError(f"Expected 3 dimensions, got {len(dims)}")
         l, w, h = dims
-        current = orders[uid]['current']
+        
+        # Проверяем что orders[uid] и current существуют
+        if uid not in orders:
+            logger.error(f"z_get_dims: uid {uid} not in orders")
+            await update.message.reply_text('Ошибка: сессия не найдена. Начни сначала: /zakaz')
+            return ConversationHandler.END
+            
+        current = orders[uid].get('current', {})
+        logger.info(f"z_get_dims: current={current}")
+        
+        # Проверяем что qty есть
+        if 'qty' not in current:
+            logger.error(f"z_get_dims: qty not in current")
+            await update.message.reply_text('Ошибка: количество не задано. Начни сначала: /zakaz')
+            return ConversationHandler.END
+            
         current['dimensions'] = f"{int(l)}×{int(w)}×{int(h)}"
         current['dims'] = (l, w, h)
         qty = current['qty']
@@ -830,17 +846,19 @@ async def z_get_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current['items_per_box'] = items_per_box
         current['boxes'] = boxes
         
-        keyboard = [[InlineKeyboardButton("Да", callback_data='z_more_yes'), 
-                     InlineKeyboardButton("Нет", callback_data='z_more_no')]]
+        logger.info(f"z_get_dims: success, returning Z_MORE")
+        keyboard = [[InlineKeyboardButton("✅ Да", callback_data='z_more_yes'), 
+                     InlineKeyboardButton("❌ Нет", callback_data='z_more_no')]]
         await update.message.reply_text(
             f'📐 Размеры: {int(l)}×{int(w)}×{int(h)} см\n'
             f'📦 В короб влезет: ~{items_per_box} шт\n'
             f'📦 Коробок: {boxes}\n\n'
-            f'Ещё товар?',
+            f'➕ Ещё товар?',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return Z_MORE
-    except:
+    except Exception as e:
+        logger.error(f"Ошибка в z_get_dims: {e}")
         await update.message.reply_text('Неверный формат. Введи 3 числа:\n15 10 8')
         return Z_DIMS
 
@@ -848,6 +866,7 @@ async def z_more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = str(update.effective_user.id)
+    logger.info(f"z_more_cb called for uid={uid}, data={query.data}")
     
     try:
         current = orders[uid]['current']
@@ -2450,7 +2469,10 @@ def main():
             Z_BUNDLE_SELECT: [CallbackQueryHandler(z_bundle_select_cb, pattern='^z_bundle_')],
             Z_BUNDLE_NEW: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_bundle_new_name)],
             Z_DIMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_dims)],
-            Z_MORE: [CallbackQueryHandler(z_more_cb, pattern='^z_more_')],
+            Z_MORE: [
+                CallbackQueryHandler(z_more_cb, pattern='^z_more_'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: update.message.reply_text('Нажми кнопку ✅ Да или ❌ Нет'))
+            ],
             Z_CLIENT_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_client_rate)],
             Z_REAL_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_real_rate)],
             Z_COMMISSION: [CallbackQueryHandler(z_commission_cb, pattern='^z_comm_')],
