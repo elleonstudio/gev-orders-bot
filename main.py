@@ -114,19 +114,33 @@ def find_best_package(packages, l, w, h):
     return min(suitable, key=lambda p: p['volume'])
 
 async def get_client_orders_from_notion(client_name):
-    """Получаем все заказы клиента из Notion с обработкой ошибок"""
+    """Получаем все заказы клиента из Notion с обработкой ошибок (регистронезависимый поиск)"""
     if not notion or not NOTION_DATABASE_ID:
         return None, "Notion не настроен"
     
     try:
+        # Получаем последние 100 записей (без фильтра для case-insensitive поиска)
         res = notion.databases.query(
             database_id=NOTION_DATABASE_ID,
-            filter={"property": "Клиент", "select": {"equals": client_name}},
             sorts=[{"timestamp": "created_time", "direction": "descending"}],
-            page_size=10
+            page_size=100
         )
-        orders_list = []
+        
+        # Фильтруем в Python с case-insensitive сравнением
+        client_name_lower = client_name.lower()
+        filtered_results = []
         for page in res.get('results', []):
+            props = page['properties']
+            # Получаем имя клиента из select поля
+            client_select = props.get('Клиент', {})
+            if client_select.get('select'):
+                notion_client_name = client_select['select'].get('name', '')
+                # Case-insensitive сравнение
+                if notion_client_name.lower() == client_name_lower:
+                    filtered_results.append(page)
+        
+        orders_list = []
+        for page in filtered_results[:10]:  # Берём только первые 10 совпадений
             props = page['properties']
             created = page.get('created_time', '')[:10]
             items_text = props.get('Описание товара', {}).get('rich_text', [{}])[0].get('text', {}).get('content', '')
@@ -185,12 +199,7 @@ async def get_client_orders_from_notion(client_name):
             orders_list.append(order)
         return orders_list, None
     except Exception as e:
-        error_str = str(e)
-        # Если клиент не найден в списке select — возвращаем пустой список
-        if 'select option' in error_str and 'not found' in error_str:
-            logger.info(f"Клиент '{client_name}' не найден в списке Notion — создаём нового")
-            return [], None  # Пустой список = новый клиент
-        error_msg = f"{type(e).__name__}: {error_str}"
+        error_msg = f"{type(e).__name__}: {str(e)}"
         logger.error(f"Error fetching client orders: {error_msg}")
         logger.error(traceback.format_exc())
         return None, error_msg
@@ -785,13 +794,16 @@ async def z_bundle_new_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         orders[uid]['current']['bundle_name'] = bundle_name
         orders[uid]['current']['is_bundle'] = True
+        orders[uid]['current']['dimensions'] = 'Набор'
+        orders[uid]['current']['dims'] = (0, 0, 0)
+        
+        # Пропускаем запрос размеров для набора — они будут запрошены в /ff
         await update.message.reply_text(
             f'📦 Новый набор: <b>{bundle_name}</b>\n\n'
-            f'Введи размеры упаковки для этого набора (Д Ш В в см):\n'
-            f'Эти размеры будут использоваться в /ff для выбора пакета',
+            f'Теперь введи цену клиенту за 1 шт (CNY):',
             parse_mode='HTML'
         )
-        return Z_DIMS
+        return Z_PRICE
     except Exception as e:
         logger.error(f"Ошибка в z_bundle_new_name: {e}")
         await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
@@ -842,9 +854,11 @@ async def z_more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         items = orders[uid]['items']
         
         # Добавляем текущий товар в список (если его ещё нет)
+        # Проверяем уникальность по комбинации name + bundle_name
         if current and current.get('name'):
-            existing_names = [i['name'] for i in items]
-            if current['name'] not in existing_names:
+            existing_keys = [(i['name'], i.get('bundle_name')) for i in items]
+            current_key = (current['name'], current.get('bundle_name'))
+            if current_key not in existing_keys:
                 items.append(current)
         
         if query.data == 'z_more_yes':
@@ -1169,10 +1183,11 @@ async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Без аргументов — работаем как раньше (нужен предыдущий /zakaz)
     if uid not in orders or not orders[uid].get('items'):
-        await update.message.reply_text(
-            'Сначала выполни /zakaz [имя клиента]\n\n'
-            'Или сразу: /ff [имя клиента]'
-        )
+        msg = 'Сначала выполни /zakaz [имя клиента]\n\nИли сразу: /ff [имя клиента]'
+        if hasattr(update, 'message') and update.message:
+            await update.message.reply_text(msg)
+        elif hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(msg)
         return ConversationHandler.END
     
     result = await show_order_selection_ff(update, context, uid)
@@ -1183,7 +1198,11 @@ async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_order_selection_ff(update: Update, context: ContextTypes.DEFAULT_TYPE, uid):
     """Показывает выбор заказа для FF"""
     if uid not in orders:
-        await update.message.reply_text('Сначала выполни /zakaz [имя клиента]')
+        msg = 'Сначала выполни /zakaz [имя клиента]'
+        if hasattr(update, 'message') and update.message:
+            await update.message.reply_text(msg)
+        elif hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(msg)
         return None
     
     client_orders = orders[uid].get('all_client_orders', [])
@@ -1193,7 +1212,11 @@ async def show_order_selection_ff(update: Update, context: ContextTypes.DEFAULT_
         # Нет заказов в базе — работаем с текущим
         if orders[uid].get('items'):
             return await show_ff_main_menu(update, context, uid)
-        await update.message.reply_text('Нет данных для расчёта. Сначала выполни /zakaz')
+        msg = 'Нет данных для расчёта. Сначала выполни /zakaz'
+        if hasattr(update, 'message') and update.message:
+            await update.message.reply_text(msg)
+        elif hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(msg)
         return None
     
     if len(client_orders) == 1:
@@ -1216,11 +1239,20 @@ async def show_order_selection_ff(update: Update, context: ContextTypes.DEFAULT_
     
     keyboard.append([InlineKeyboardButton("➕ Новый заказ", callback_data='sel_order_new')])
     
-    await update.message.reply_text(
-        f'📦 FF Китай\nКлиент: <b>{client}</b>\n\nВыбери заказ:',
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+    msg_text = f'📦 FF Китай\nКлиент: <b>{client}</b>\n\nВыбери заказ:'
+    
+    if hasattr(update, 'message') and update.message:
+        await update.message.reply_text(
+            msg_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    elif hasattr(update, 'callback_query') and update.callback_query:
+        await update.callback_query.edit_message_text(
+            msg_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
     return F_SELECT_ORDER
 
 async def load_order_data_ff(uid, order_idx):
@@ -1292,8 +1324,10 @@ async def show_ff_main_menu(update_or_query, context, uid):
         msg = 'Нет товаров для расчёта FF'
         if hasattr(update_or_query, 'edit_message_text'):
             await update_or_query.edit_message_text(msg)
-        else:
+        elif hasattr(update_or_query, 'message') and update_or_query.message:
             await update_or_query.message.reply_text(msg)
+        elif hasattr(update_or_query, 'effective_message') and update_or_query.effective_message:
+            await update_or_query.effective_message.reply_text(msg)
         return ConversationHandler.END
     
     # Формируем список товаров с чекбоксами
@@ -1332,8 +1366,14 @@ async def show_ff_main_menu(update_or_query, context, uid):
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='HTML'
         )
-    else:
+    elif hasattr(update_or_query, 'message') and update_or_query.message:
         await update_or_query.message.reply_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    elif hasattr(update_or_query, 'effective_message') and update_or_query.effective_message:
+        await update_or_query.effective_message.reply_text(
             msg,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='HTML'
@@ -1997,10 +2037,11 @@ async def cmd_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Без аргументов — работаем как раньше
     if uid not in orders or not orders[uid].get('items'):
-        await update.message.reply_text(
-            'Сначала выполни /zakaz [имя клиента]\n\n'
-            'Или сразу: /dostavka [имя клиента]'
-        )
+        msg = 'Сначала выполни /zakaz [имя клиента]\n\nИли сразу: /dostavka [имя клиента]'
+        if hasattr(update, 'message') and update.message:
+            await update.message.reply_text(msg)
+        elif hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(msg)
         return ConversationHandler.END
     
     result = await show_order_selection_dostavka(update, context, uid)
@@ -2039,11 +2080,20 @@ async def show_order_selection_dostavka(update: Update, context: ContextTypes.DE
     
     keyboard.append([InlineKeyboardButton("➕ Новый заказ", callback_data='sel_order_new')])
     
-    await update.message.reply_text(
-        f'🚚 FILLX Доставка РФ\nКлиент: <b>{client}</b>\n\nВыбери заказ:',
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
+    msg_text = f'🚚 FILLX Доставка РФ\nКлиент: <b>{client}</b>\n\nВыбери заказ:'
+    
+    if hasattr(update, 'message') and update.message:
+        await update.message.reply_text(
+            msg_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    elif hasattr(update, 'callback_query') and update.callback_query:
+        await update.callback_query.edit_message_text(
+            msg_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
     return D_SELECT_ORDER
 
 async def load_order_data_dostavka(uid, order_idx):
@@ -2113,7 +2163,17 @@ async def start_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE, uid
             row.append(InlineKeyboardButton(cities[i+1], callback_data=f'd_wh_{cities[i+1]}'))
         keyboard.append(row)
     
-    await update.message.reply_text('Выбери склад РФ:', reply_markup=InlineKeyboardMarkup(keyboard))
+    # Поддержка как message, так и callback_query
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            'Выбери склад РФ:', 
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await update.message.reply_text(
+            'Выбери склад РФ:', 
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 async def d_warehouse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
