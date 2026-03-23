@@ -84,6 +84,94 @@ def calculate_boxes(l, w, h, qty):
     boxes = math.ceil(qty / items_per_box)
     return items_per_box, boxes
 
+def optimize_boxes(items):
+    """
+    Оптимальная упаковка товаров в коробки.
+    Смешивает разные товары для минимизации количества коробок.
+    
+    items: список {'name': str, 'qty': int, 'dims': (l, w, h), 'volume': float}
+    
+    Возвращает: список коробок [{'items': [...], 'total_volume': float, 'dims': (L, W, H)}]
+    """
+    MAX_L, MAX_W, MAX_H = 60, 50, 40
+    BOX_VOLUME = MAX_L * MAX_W * MAX_H
+    
+    # Разбиваем все товары на единичные экземпляры с размерами
+    all_items = []
+    for item in items:
+        l, w, h = item['dims']
+        volume = l * w * h
+        for i in range(item['qty']):
+            all_items.append({
+                'name': item['name'],
+                'dims': (l, w, h),
+                'volume': volume,
+                'original_idx': len(all_items)
+            })
+    
+    # Сортируем по объёму (от большего к меньшему) для лучшей упаковки
+    all_items.sort(key=lambda x: x['volume'], reverse=True)
+    
+    # Алгоритм First Fit Decreasing
+    boxes = []
+    
+    for item in all_items:
+        l, w, h = item['dims']
+        placed = False
+        
+        # Пробуем поместить в существующую коробку
+        for box in boxes:
+            # Проверяем, влезает ли по объёму
+            if box['remaining_volume'] >= item['volume']:
+                # Проверяем, можно ли физически разместить
+                # Упрощённая проверка: по каждому измерению
+                can_fit = False
+                for rot_l, rot_w, rot_h in [
+                    (l, w, h), (l, h, w), (w, l, h), 
+                    (w, h, l), (h, l, w), (h, w, l)
+                ]:
+                    # Проверяем, есть ли место в коробке
+                    remaining_l = MAX_L - box['used_l']
+                    remaining_w = MAX_W - box['used_w']
+                    remaining_h = MAX_H - box['used_h']
+                    
+                    if rot_l <= remaining_l and rot_w <= remaining_w and rot_h <= remaining_h:
+                        can_fit = True
+                        box['used_l'] += rot_l
+                        box['used_w'] += rot_w
+                        box['used_h'] += rot_h
+                        break
+                
+                if can_fit:
+                    box['items'].append(item)
+                    box['remaining_volume'] -= item['volume']
+                    placed = True
+                    break
+        
+        # Если не поместилось — создаём новую коробку
+        if not placed:
+            boxes.append({
+                'items': [item],
+                'total_volume': BOX_VOLUME,
+                'remaining_volume': BOX_VOLUME - item['volume'],
+                'used_l': l,
+                'used_w': w,
+                'used_h': h,
+                'dims': (MAX_L, MAX_W, MAX_H)
+            })
+    
+    return boxes
+
+def calculate_boxes_optimized(items):
+    """
+    Расчёт коробок с оптимизацией.
+    items: список {'name': str, 'qty': int, 'dims': (l, w, h)}
+    
+    Возвращает: (total_boxes, boxes_details)
+    """
+    boxes = optimize_boxes(items)
+    return len(boxes), boxes
+
 async def get_packages_from_notion():
     """Получаем пакеты из базы Notion"""
     if not notion or not PACKAGES_DATABASE_ID:
@@ -897,6 +985,37 @@ async def z_get_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     text = update.message.text.strip()
     logger.info(f"z_get_dims called for uid={uid}, text='{text}'")
+    
+    # Проверка на пропуск размеров (для услуг, цифровых товаров)
+    if text in ['-', '—', 'пропустить', 'skip', 'нет']:
+        logger.info(f"z_get_dims: skipping dimensions for uid={uid}")
+        
+        if uid not in orders:
+            logger.error(f"z_get_dims: uid {uid} not in orders")
+            await update.message.reply_text('Ошибка: сессия не найдена. Начни сначала: /zakaz')
+            return ConversationHandler.END
+            
+        current = orders[uid].get('current', {})
+        
+        if 'qty' not in current:
+            logger.error(f"z_get_dims: qty not in current")
+            await update.message.reply_text('Ошибка: количество не задано. Начни сначала: /zakaz')
+            return ConversationHandler.END
+        
+        # Устанавливаем нулевые размеры
+        current['dimensions'] = '—'
+        current['dims'] = (0, 0, 0)
+        current['items_per_box'] = 0
+        current['boxes'] = 0
+        
+        keyboard = [[InlineKeyboardButton("✅ Да", callback_data='z_more_yes'), 
+                     InlineKeyboardButton("❌ Нет", callback_data='z_more_no')]]
+        await update.message.reply_text(
+            '➕ Ещё товар?',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return Z_MORE
+    
     try:
         dims = [float(x) for x in text.split()]
         if len(dims) != 3:
@@ -939,7 +1058,7 @@ async def z_get_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return Z_MORE
     except Exception as e:
         logger.error(f"Ошибка в z_get_dims: {e}")
-        await update.message.reply_text('Неверный формат. Введи 3 числа:\n15 10 8')
+        await update.message.reply_text('Неверный формат. Введи 3 числа (15 10 8) или "-" чтобы пропустить:')
         return Z_DIMS
 
 async def z_more_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1330,6 +1449,9 @@ async def show_order_selection_ff(update: Update, context: ContextTypes.DEFAULT_
             await update.callback_query.edit_message_text(msg)
         return None
     
+    # Конвертируем наборы из /zakaz в формат /ff
+    convert_zakaz_bundles_to_ff(uid)
+    
     client_orders = orders[uid].get('all_client_orders', [])
     client = orders[uid].get('client', 'Неизвестно')
     
@@ -1411,6 +1533,43 @@ async def load_order_data_ff(uid, order_idx):
         orders[uid]['ff_single_items'] = []
         orders[uid]['ff_items_in_bundles'] = set()
 
+async def convert_zakaz_bundles_to_ff(uid):
+    """Конвертирует наборы из /zakaz (bundle_name) в формат /ff (ff_bundles)"""
+    items = orders[uid].get('items', [])
+    if not items:
+        return
+    
+    # Группируем товары по bundle_name
+    bundles_map = {}
+    for idx, item in enumerate(items):
+        bundle_name = item.get('bundle_name')
+        if bundle_name:
+            if bundle_name not in bundles_map:
+                bundles_map[bundle_name] = []
+            bundles_map[bundle_name].append(idx)
+    
+    # Создаём ff_bundles из сгруппированных товаров
+    ff_bundles = []
+    items_in_bundles = set()
+    
+    for bundle_name, item_indices in bundles_map.items():
+        # Считаем общие размеры набора (пока просто сумма)
+        total_qty = sum(items[i]['qty'] for i in item_indices)
+        
+        ff_bundles.append({
+            'name': bundle_name,
+            'item_indices': item_indices,
+            'dims': (0, 0, 0),  # Будет запрошено в /ff
+            'packages': [],
+            'total_qty': total_qty,
+            'source': 'zakaz'  # Помечаем что из /zakaz
+        })
+        items_in_bundles.update(item_indices)
+    
+    orders[uid]['ff_bundles'] = ff_bundles
+    orders[uid]['ff_items_in_bundles'] = items_in_bundles
+    logger.info(f"Converted {len(ff_bundles)} bundles from /zakaz for uid={uid}")
+
 async def f_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка выбора заказа в FF"""
     query = update.callback_query
@@ -1424,6 +1583,9 @@ async def f_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         order_idx = int(query.data.replace('sel_order_', ''))
         await load_order_data_ff(uid, order_idx)
+        
+        # Конвертируем наборы из /zakaz в формат /ff
+        await convert_zakaz_bundles_to_ff(uid)
         
         order = orders[uid]['all_client_orders'][order_idx]
         items_list = order.get('items', [])
@@ -2551,6 +2713,357 @@ async def save_to_notion(update, context, uid):
         logger.error(traceback.format_exc())
         return None
 
+# ======== /PASTE - Быстрый расчёт из текста ========
+
+async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Быстрый расчёт заказа из вставленного текста.
+    Формат с полными данными:
+    
+    Клиент: Имя
+    
+    Товар 1:
+    Название: Крепление
+    Количество: 400
+    Цена клиенту: 6.2
+    Закупка: 4.5
+    Доставка: 43.6
+    Размеры: 16 12 5
+    
+    Курс клиенту: 58
+    Мой курс: 55
+    Комиссия: 3%
+    Минимальная комиссия: 10000
+    """
+    uid = str(update.effective_user.id)
+    
+    # Получаем текст после команды
+    text = update.message.text.replace('/paste', '').strip()
+    
+    if not text:
+        await update.message.reply_text(
+            '📋 Вставь расчёт в формате:\n\n'
+            '<code>Клиент: Имя</code>\n'
+            '<code>Товар 1:</code>\n'
+            '<code>Название: Крепление</code>\n'
+            '<code>Количество: 400</code>\n'
+            '<code>Цена клиенту: 6.2</code>\n'
+            '<code>Закупка: 4.5</code>\n'
+            '<code>Доставка: 43.6</code>\n'
+            '<code>Размеры: 16 12 5</code>\n\n'
+            '<code>Курс клиенту: 58</code>\n'
+            '<code>Мой курс: 55</code>\n'
+            '<code>Комиссия: 3%</code>\n'
+            '<code>Минимальная комиссия: 10000</code>',
+            parse_mode='HTML'
+        )
+        return
+    
+    # Парсим текст
+    lines = text.strip().split('\n')
+    
+    # Данные заказа
+    client = 'Unknown'
+    items = []
+    client_rate = 58
+    real_rate = 55
+    commission_pct = 3
+    min_commission = 10000
+    
+    # Текущий товар
+    current_item = None
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+        
+        if not line:
+            continue
+        
+        # Клиент
+        if line.lower().startswith('клиент:'):
+            client = line.split(':', 1)[1].strip()
+        
+        # Новый товар
+        elif re.match(r'товар\s*\d+:', line, re.IGNORECASE):
+            if current_item and current_item.get('name'):
+                items.append(current_item)
+            current_item = {'dims': (0, 0, 0)}
+        
+        # Поля товара
+        elif line.lower().startswith('название:'):
+            if current_item is None:
+                current_item = {'dims': (0, 0, 0)}
+            current_item['name'] = line.split(':', 1)[1].strip()
+        
+        elif line.lower().startswith('количество:'):
+            if current_item:
+                try:
+                    current_item['qty'] = int(line.split(':', 1)[1].strip())
+                except:
+                    current_item['qty'] = 0
+        
+        elif line.lower().startswith('цена клиенту:'):
+            if current_item:
+                try:
+                    current_item['price'] = float(line.split(':', 1)[1].strip().replace('¥', ''))
+                except:
+                    current_item['price'] = 0
+        
+        elif line.lower().startswith('закупка:'):
+            if current_item:
+                try:
+                    current_item['purchase'] = float(line.split(':', 1)[1].strip().replace('¥', ''))
+                except:
+                    current_item['purchase'] = 0
+        
+        elif line.lower().startswith('доставка:'):
+            if current_item:
+                try:
+                    current_item['delivery_factory'] = float(line.split(':', 1)[1].strip().replace('¥', ''))
+                except:
+                    current_item['delivery_factory'] = 0
+        
+        elif line.lower().startswith('размеры:'):
+            if current_item:
+                try:
+                    dims = [float(x) for x in line.split(':', 1)[1].strip().split()]
+                    if len(dims) == 3:
+                        current_item['dims'] = tuple(dims)
+                        current_item['dimensions'] = f"{int(dims[0])}×{int(dims[1])}×{int(dims[2])}"
+                except:
+                    pass
+        
+        # Курсы и комиссия
+        elif line.lower().startswith('курс клиенту:'):
+            try:
+                client_rate = float(line.split(':', 1)[1].strip())
+            except:
+                pass
+        
+        elif line.lower().startswith('мой курс:'):
+            try:
+                real_rate = float(line.split(':', 1)[1].strip())
+            except:
+                pass
+        
+        elif line.lower().startswith('курс:'):
+            try:
+                val = line.split(':', 1)[1].strip().lower()
+                if 'клиент' in val:
+                    client_rate = float(val.replace('клиент', '').strip())
+                elif 'реальный' in val or 'мой' in val:
+                    real_rate = float(val.replace('реальный', '').replace('мой', '').strip())
+            except:
+                pass
+        
+        elif line.lower().startswith('комиссия:'):
+            try:
+                val = line.split(':', 1)[1].strip().replace('%', '')
+                commission_pct = float(val)
+            except:
+                pass
+        
+        elif 'минимальная' in line.lower() and 'комиссия' in line.lower():
+            try:
+                min_commission = float(line.split(':', 1)[1].strip().replace('amd', '').replace('֏', '').strip())
+            except:
+                pass
+    
+    # Добавляем последний товар
+    if current_item and current_item.get('name'):
+        items.append(current_item)
+    
+    if not items:
+        await update.message.reply_text(
+            '❌ Не удалось распознать товары.\n\n'
+            'Проверь формат. Отправь /paste для примера.',
+            parse_mode='HTML'
+        )
+        return
+    
+    # Расчёты
+    total_client_cny = sum(item['qty'] * item['price'] for item in items)
+    total_delivery_cny = sum(item['delivery_factory'] for item in items)
+    total_purchase_cny = sum(item['qty'] * item['purchase'] for item in items)
+    total_cny = total_client_cny + total_delivery_cny
+    
+    # Расчёт в AMD
+    total_client_amd = total_cny * client_rate
+    total_purchase_amd = (total_purchase_cny + total_delivery_cny) * real_rate
+    
+    # Комиссия
+    commission_amd = total_client_amd * (commission_pct / 100)
+    if commission_amd < min_commission:
+        commission_amd = min_commission
+        commission_note = f"минимум {min_commission:,.0f} AMD"
+    else:
+        commission_note = f"{commission_pct}%"
+    
+    # Итого к оплате
+    final_total_amd = total_client_amd + commission_amd
+    profit_amd = total_client_amd - total_purchase_amd
+    
+    # Оптимизация коробок
+    boxes_optimized = optimize_boxes([{'name': i['name'], 'qty': i['qty'], 'dims': i['dims'], 'volume': i['dims'][0]*i['dims'][1]*i['dims'][2]} for i in items])
+    total_boxes = len(boxes_optimized)
+    
+    # Формируем сообщение для клиента
+    msg_client = f'<b>Товары:</b>\n'
+    for item in items:
+        subtotal = item['qty'] * item['price']
+        item_total = subtotal + item['delivery_factory']
+        msg_client += (
+            f"• {item['name']}: {item['qty']} шт × {item['price']}¥ = {subtotal:.1f}¥"
+            f" + {item['delivery_factory']}¥ = {item_total:.1f}¥\n"
+        )
+    
+    msg_client += '━━━━━━━━━━\n'
+    msg_client += f'<b>Товар:</b> {total_client_cny:.1f}¥\n'
+    msg_client += f'<b>Доставка:</b> {total_delivery_cny:.1f}¥\n'
+    msg_client += f'<b>Комиссия:</b> {commission_amd:,.0f} AMD\n'
+    msg_client += '━━━━━━━━━━\n'
+    msg_client += f'<b>Итого:</b> {total_cny:.1f}¥\n'
+    msg_client += f'<b>Итого:</b> {final_total_amd:,.0f} AMD'
+    
+    # Формируем сообщение для себя (админ)
+    msg_admin = f'📦 <b>Коробки:</b> {total_boxes} шт\n\n'
+    
+    msg_admin += '<b>💰 Расчёт:</b>\n'
+    msg_admin += f'Клиенту: {total_client_amd:,.0f} AMD\n'
+    msg_admin += f'Закупка: {total_purchase_amd:,.0f} AMD\n'
+    if commission_amd == min_commission:
+        msg_admin += f'Комиссия {commission_pct}% = {total_client_amd * commission_pct / 100:,.0f} AMD → минимум {commission_amd:,.0f} AMD\n'
+    else:
+        msg_admin += f'Комиссия {commission_pct}%: {commission_amd:,.0f} AMD\n'
+    msg_admin += '━━━━━━━━━━\n'
+    msg_admin += f'<b>К ОПЛАТЕ:</b> {final_total_amd:,.0f} AMD\n'
+    msg_admin += f'<b>Прибыль:</b> {profit_amd:,.0f} AMD'
+    
+    # Кнопки действий
+    keyboard = [
+        [InlineKeyboardButton("💾 Сохранить в Notion", callback_data=f'paste_save_{uid}')],
+        [InlineKeyboardButton("📦 Расчитать FF", callback_data=f'paste_ff_{uid}')],
+        [InlineKeyboardButton("🚚 Расчитать доставку", callback_data=f'paste_dostavka_{uid}')],
+    ]
+    
+    # Сохраняем в сессию
+    orders[uid] = {
+        'type': 'paste',
+        'items': items,
+        'client': client,
+        'client_rate': client_rate,
+        'real_rate': real_rate,
+        'commission_pct': commission_pct,
+        'min_commission': min_commission,
+        'total_cny': total_cny,
+        'total_client_amd': total_client_amd,
+        'total_purchase_amd': total_purchase_amd,
+        'commission_amd': commission_amd,
+        'final_total_amd': final_total_amd,
+        'profit_amd': profit_amd,
+        'total_boxes': total_boxes
+    }
+    
+    # Отправляем первое сообщение - клиенту
+    await update.message.reply_text(
+        msg_client,
+        parse_mode='HTML'
+    )
+    
+    # Отправляем второе сообщение - себе (с кнопками)
+    await update.message.reply_text(
+        msg_admin,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+async def paste_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка кнопок после /paste"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    uid = str(update.effective_user.id)
+    
+    if uid not in orders or orders[uid].get('type') != 'paste':
+        await query.edit_message_text('❌ Данные устарели. Выполни /paste снова.')
+        return
+    
+    items = orders[uid]['items']
+    
+    if data.startswith('paste_save_'):
+        # Сохраняем в Notion
+        # Генерируем код заказа
+        order_code = f"PASTE-{datetime.now().strftime('%y%m%d-%H%M')}"
+        # Сохраняем в Notion
+        # Генерируем код заказа
+        order_code = f"PASTE-{datetime.now().strftime('%y%m%d-%H%M')}"
+        
+        # Формируем текст для Notion
+        items_text = '\n'.join([
+            f"• {i['name']}: {i['qty']} шт × {i['price']}¥ = {i['total']:.1f}¥"
+            for i in items
+        ])
+        
+        notion_data = {
+            'order_code': order_code,
+            'client': 'Paste',
+            'items_text': items_text,
+            'total_cny': total,
+            'status': 'Новый'
+        }
+        
+        url = await save_order_to_notion(notion_data)
+        
+        if url:
+            await query.edit_message_text(
+                f'✅ Сохранено в Notion\n\n'
+                f'📋 {order_code}\n'
+                f'💰 Итого: {total:.1f}¥\n\n'
+                f'<a href="{url}">Открыть в Notion</a>',
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+        else:
+            await query.edit_message_text(
+                f'⚠️ Не удалось сохранить в Notion\n\n'
+                f'📋 {order_code}\n'
+                f'💰 Итого: {total:.1f}¥'
+            )
+    
+    elif data.startswith('paste_ff_'):
+        # Конвертируем в формат /ff
+        orders[uid]['type'] = 'ff'
+        orders[uid]['client'] = 'Paste'
+        orders[uid]['ff_bundles'] = []
+        orders[uid]['ff_single_items'] = []
+        orders[uid]['ff_items_in_bundles'] = set()
+        
+        # Преобразуем items в формат с dims
+        for item in items:
+            item['dims'] = (0, 0, 0)
+            item['dimensions'] = ''
+            item['is_bundle'] = False
+            item['bundle_name'] = None
+        
+        await query.edit_message_text('📦 Перехожу к расчёту FF...')
+        await show_ff_main_menu(update, context, uid)
+    
+    elif data.startswith('paste_dostavka_'):
+        # Конвертируем в формат /dostavka
+        orders[uid]['type'] = 'dostavka'
+        orders[uid]['client'] = 'Paste'
+        
+        for item in items:
+            item['dims'] = (0, 0, 0)
+            item['dimensions'] = ''
+        
+        await query.edit_message_text('🚚 Перехожу к расчёту доставки...')
+        # Вызываем dostavka (нужно добавить соответствующую функцию)
+        await start_dostavka(update, context)
+
 # ======== MAIN ========
 
 def main():
@@ -2631,9 +3144,12 @@ def main():
     # Start command
     app.add_handler(CommandHandler('start', start))
     
+    # Paste command
+    app.add_handler(CommandHandler('paste', cmd_paste))
+    app.add_handler(CallbackQueryHandler(paste_callback_handler, pattern='^paste_'))
+    
     logger.info("Bot v38 starting...")
     app.run_polling()
 
 if __name__ == '__main__':
     main()
-    
