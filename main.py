@@ -862,6 +862,11 @@ async def z_get_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('Неверный формат. Введи 3 числа:\n15 10 8')
         return Z_DIMS
 
+async def z_more_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текстового ввода вместо нажатия кнопки Да/Нет"""
+    await update.message.reply_text('Нажми кнопку ✅ Да или ❌ Нет')
+    return Z_MORE
+
 async def z_more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2471,7 +2476,7 @@ def main():
             Z_DIMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_dims)],
             Z_MORE: [
                 CallbackQueryHandler(z_more_cb, pattern='^z_more_'),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, lambda update, context: update.message.reply_text('Нажми кнопку ✅ Да или ❌ Нет'))
+                MessageHandler(filters.TEXT & ~filters.COMMAND, z_more_text_handler)
             ],
             Z_CLIENT_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_client_rate)],
             Z_REAL_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_real_rate)],
