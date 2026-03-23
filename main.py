@@ -253,7 +253,7 @@ async def check_notion_access():
 
 # ======== /ZAKAZ ========
 
-Z_INVOICE, Z_SELECT_ORDER, Z_ORDER_ACTION, Z_SELECT_ITEMS, Z_EDIT_ITEM_QTY, Z_NAME, Z_QTY, Z_PRICE, Z_PURCHASE, Z_DELIVERY, Z_BUNDLE_SELECT, Z_BUNDLE_NEW, Z_DIMS, Z_MORE, Z_CLIENT_RATE, Z_REAL_RATE, Z_COMMISSION = range(17)
+Z_INVOICE, Z_SELECT_ORDER, Z_ORDER_ACTION, Z_SELECT_ITEMS, Z_EDIT_ITEM_QTY, Z_NAME, Z_QTY, Z_PRICE, Z_PURCHASE, Z_DELIVERY, Z_BUNDLE_SELECT, Z_BUNDLE_NEW, Z_BUNDLE_NEW_FROM_CURRENT, Z_DIMS, Z_MORE, Z_CLIENT_RATE, Z_REAL_RATE, Z_COMMISSION = range(18)
 
 async def cmd_zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -711,16 +711,26 @@ async def z_get_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = []
         
-        # Кнопки существующих наборов
+        # Если есть активный набор, показываем его первым с пометкой
+        active_bundle = orders[uid].get('active_bundle')
+        if active_bundle and active_bundle in existing_bundles:
+            keyboard.append([InlineKeyboardButton(f"🔄 Продолжить: {active_bundle}", callback_data=f'z_bundle_existing_{active_bundle}')])
+            keyboard.append([InlineKeyboardButton("❌ Выйти из набора", callback_data='z_bundle_exit')])
+        
+        # Остальные существующие наборы (кроме активного)
         for bundle in existing_bundles:
-            keyboard.append([InlineKeyboardButton(f"📦 {bundle}", callback_data=f'z_bundle_existing_{bundle}')])
+            if bundle != active_bundle:
+                keyboard.append([InlineKeyboardButton(f"📦 {bundle}", callback_data=f'z_bundle_existing_{bundle}')])
         
         # Основные кнопки
-        keyboard.append([InlineKeyboardButton("➕ Новый набор", callback_data='z_bundle_new')])
         keyboard.append([InlineKeyboardButton("📦 По одиночке", callback_data='z_bundle_single')])
+        keyboard.append([InlineKeyboardButton("📦➡️📦 Сделать набором из этого товара", callback_data='z_bundle_make_from_current')])
+        keyboard.append([InlineKeyboardButton("➕ Новый пустой набор", callback_data='z_bundle_new')])
         
         msg = "📦 Что это за товар?\n\n"
-        if existing_bundles:
+        if active_bundle:
+            msg += f"Сейчас добавляем в: <b>{active_bundle}</b>\n\n"
+        elif existing_bundles:
             msg += "Существующие наборы в заказе:\n"
             for b in existing_bundles:
                 msg += f"• {b}\n"
@@ -729,7 +739,8 @@ async def z_get_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             msg,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
         )
         return Z_BUNDLE_SELECT
     except:
@@ -749,12 +760,37 @@ async def z_bundle_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # Обычный товар
             orders[uid]['current']['bundle_name'] = None
             orders[uid]['current']['is_bundle'] = False
+            # Сбрасываем активный набор
+            if 'active_bundle' in orders[uid]:
+                del orders[uid]['active_bundle']
             await query.edit_message_text(
                 '📦 Обычный товар\n\n'
                 'Введи размеры 1 шт (Д Ш В в см):\n'
                 'Например: 15 10 8'
             )
             return Z_DIMS
+            
+        elif data == 'z_bundle_exit':
+            # Выйти из активного набора
+            if 'active_bundle' in orders[uid]:
+                del orders[uid]['active_bundle']
+            orders[uid]['current']['bundle_name'] = None
+            orders[uid]['current']['is_bundle'] = False
+            await query.edit_message_text(
+                '📦 Вышли из набора\n\n'
+                'Введи размеры 1 шт (Д Ш В в см):\n'
+                'Например: 15 10 8'
+            )
+            return Z_DIMS
+            
+        elif data == 'z_bundle_make_from_current':
+            # Сделать текущий товар частью нового набора
+            await query.edit_message_text(
+                '📦➡️📦 Сделать набором из этого товара\n\n'
+                'Введи имя набора:\n'
+                'Например: "Сет розовый", "Комбо A"'
+            )
+            return Z_BUNDLE_NEW_FROM_CURRENT
             
         elif data == 'z_bundle_new':
             # Новый набор - просим имя
@@ -770,6 +806,8 @@ async def z_bundle_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             bundle_name = data.replace('z_bundle_existing_', '')
             orders[uid]['current']['bundle_name'] = bundle_name
             orders[uid]['current']['is_bundle'] = True
+            # Запоминаем активный набор для последующих товаров
+            orders[uid]['active_bundle'] = bundle_name
             await query.edit_message_text(
                 f'📦 Добавляем в набор: <b>{bundle_name}</b>\n\n'
                 f'Введи размеры этого товара (Д Ш В в см):\n'
@@ -820,6 +858,34 @@ async def z_bundle_new_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return Z_MORE
     except Exception as e:
         logger.error(f"Ошибка в z_bundle_new_name: {e}")
+        await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
+
+async def z_bundle_new_from_current_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Текущий товар становится первым в новом наборе"""
+    uid = str(update.effective_user.id)
+    try:
+        bundle_name = update.message.text.strip()
+        if not bundle_name:
+            await update.message.reply_text('Имя не может быть пустым. Введи имя набора:')
+            return Z_BUNDLE_NEW_FROM_CURRENT
+        
+        # Запоминаем активный набор
+        orders[uid]['active_bundle'] = bundle_name
+        
+        # Текущий товар теперь в наборе
+        orders[uid]['current']['bundle_name'] = bundle_name
+        orders[uid]['current']['is_bundle'] = True
+        
+        await update.message.reply_text(
+            f'📦 Товар добавлен в новый набор: <b>{bundle_name}</b>\n\n'
+            f'Введи размеры этого товара (Д Ш В в см):\n'
+            f'Нужно для расчёта коробок',
+            parse_mode='HTML'
+        )
+        return Z_DIMS
+    except Exception as e:
+        logger.error(f"Ошибка в z_bundle_new_from_current_name: {e}")
         await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
         return ConversationHandler.END
 
@@ -924,6 +990,9 @@ async def z_more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return Z_NAME
         else:
             # Закончили с товарами — идём к курсам
+            # Сбрасываем активный набор
+            if 'active_bundle' in orders[uid]:
+                del orders[uid]['active_bundle']
             if 'client_rate' in orders[uid]:
                 await query.edit_message_text(
                     f'Курс клиенту ¥→драм ({orders[uid]["client_rate"]}):\n(отправь новое число или "ok")'
@@ -2505,6 +2574,7 @@ def main():
             Z_DELIVERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_delivery)],
             Z_BUNDLE_SELECT: [CallbackQueryHandler(z_bundle_select_cb, pattern='^z_bundle_')],
             Z_BUNDLE_NEW: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_bundle_new_name)],
+            Z_BUNDLE_NEW_FROM_CURRENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_bundle_new_from_current_name)],
             Z_DIMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_dims)],
             Z_MORE: [
                 CallbackQueryHandler(z_more_cb, pattern='^z_more_'),
@@ -2566,3 +2636,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
