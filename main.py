@@ -2922,10 +2922,12 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_client += '━━━━━━━━━━\n'
     msg_client += f'<b>Товар:</b> {total_client_cny:.1f}¥\n'
     msg_client += f'<b>Доставка:</b> {total_delivery_cny:.1f}¥\n'
+    msg_client += f'<b>Курс:</b> {client_rate}\n'
+    msg_client += '━━━━━━━━━━\n'
+    msg_client += f'<b>Итого:</b> {total_cny:.1f}¥ = {total_client_amd:,.0f} AMD\n'
     msg_client += f'<b>Комиссия:</b> {commission_amd:,.0f} AMD\n'
     msg_client += '━━━━━━━━━━\n'
-    msg_client += f'<b>Итого:</b> {total_cny:.1f}¥\n'
-    msg_client += f'<b>Итого:</b> {final_total_amd:,.0f} AMD'
+    msg_client += f'<b>К ОПЛАТЕ:</b> {final_total_amd:,.0f} AMD'
     
     # Формируем сообщение для себя (админ)
     msg_admin = f'📦 <b>Коробки:</b> {total_boxes} шт\n\n'
