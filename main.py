@@ -275,6 +275,36 @@ async def get_client_orders_from_notion(client_name):
                         seen_names.add(name)
                         items_list.append({'name': name, 'qty': qty})
             
+            # Получаем размеры из Notion (поле "Размеры (Д×Ш×В)")
+            dims_rich = props.get('Размеры (Д×Ш×В)', {}).get('rich_text', [])
+            dimensions_str = dims_rich[0].get('text', {}).get('content', '') if dims_rich else ''
+            
+            # Парсим размеры для каждого товара
+            parsed_dims = []
+            if dimensions_str:
+                # Формат: "16 12 5; 20 15 10" или "16×12×5; 20×15×10"
+                for dim_part in dimensions_str.split(';'):
+                    dim_part = dim_part.strip()
+                    if dim_part:
+                        # Ищем 3 числа
+                        nums = re.findall(r'\d+\.?\d*', dim_part)
+                        if len(nums) >= 3:
+                            try:
+                                parsed_dims.append((float(nums[0]), float(nums[1]), float(nums[2])))
+                            except:
+                                parsed_dims.append((0, 0, 0))
+                        else:
+                            parsed_dims.append((0, 0, 0))
+            
+            # Присваиваем размеры товарам
+            for idx, item in enumerate(items_list):
+                if idx < len(parsed_dims):
+                    item['dims'] = parsed_dims[idx]
+                    item['dimensions'] = f"{int(parsed_dims[idx][0])}×{int(parsed_dims[idx][1])}×{int(parsed_dims[idx][2])}"
+                else:
+                    item['dims'] = (0, 0, 0)
+                    item['dimensions'] = ''
+            
             # Безопасное получение кода заказа
             title_list = props.get('Код заказа', {}).get('title', [])
             code_text = title_list[0].get('text', {}).get('content', '') if title_list else ''
@@ -322,7 +352,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         notion_status = f"⚠️ Notion: {error[:50]}..." if len(error) > 50 else f"⚠️ Notion: {error}"
     
     menu = (
-        f"🤖 <b>GS Orders Bot v40</b>\n"
+        f"🤖 <b>GS Orders Bot v41</b>\n"
         f"{notion_status}\n\n"
         "📋 <b>/zakaz [имя]</b> — Новый заказ\n"
         "📦 <b>/ff</b> — FF Китай\n"
@@ -1529,8 +1559,8 @@ async def load_order_data_ff(uid, order_idx):
                 'price': 0,
                 'purchase': 0,
                 'delivery_factory': 0,
-                'dimensions': '',
-                'dims': (0, 0, 0),
+                'dimensions': i.get('dimensions', ''),
+                'dims': i.get('dims', (0, 0, 0)),
                 'boxes': 1,
                 'is_bundle': i.get('is_bundle', False)
             } for i in order['items'] if i.get('name')]
@@ -1680,7 +1710,19 @@ async def ff_main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     data = query.data
     
+    logger.info(f"FF main menu: user={uid}, data={data}")
+    
     try:
+        items = orders[uid].get('items', [])
+        logger.info(f"FF main menu: items count={len(items)}")
+        for i, it in enumerate(items[:3]):
+            logger.info(f"  Item {i}: {it.get('name')} dims={it.get('dims')}")
+        
+        # Проверяем есть ли товары без размеров
+        items_no_dims = [i for i in items if i.get('dims', (0,0,0)) == (0,0,0)]
+        if items_no_dims:
+            logger.warning(f"Items without dims: {[i.get('name') for i in items_no_dims]}")
+        
         if data == 'ff_mode_single':
             # Считать по одиночке — показываем товары, которые не в наборах
             return await start_single_items(update, context, uid)
@@ -1699,7 +1741,8 @@ async def ff_main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
     except Exception as e:
         logger.error(f"Ошибка в ff_main_menu_cb: {e}")
-        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        logger.error(traceback.format_exc())
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:200]}')
         return ConversationHandler.END
 
 async def start_single_items(update_or_query, context, uid):
@@ -1737,6 +1780,20 @@ async def show_single_item(update_or_query, context, uid):
     item_idx, item = available[idx]
     l, w, h = item['dims']
     qty = item['qty']
+    
+    # Проверяем есть ли размеры
+    if (l, w, h) == (0, 0, 0):
+        msg = f"⚠️ Товар <b>{item['name']}</b> не имеет размеров в Notion.\n\n"
+        msg += f"Возможные причины:\n"
+        msg += f"• В Notion пустое поле 'Размеры (Д×Ш×В)'\n"
+        msg += f"• Неверный формат размеров\n\n"
+        msg += f"Используй /zakaz для пересоздания заказа с размерами."
+        
+        if hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(msg, parse_mode='HTML')
+        else:
+            await update_or_query.message.reply_text(msg, parse_mode='HTML')
+        return F_SINGLE_ITEMS
     
     # Получаем пакеты из Notion
     packages = await get_packages_from_notion()
@@ -2255,8 +2312,11 @@ async def ff_summary_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 notion_url = await save_to_notion(update, context, uid)
                 if notion_url:
                     await update.message.reply_text(f"✅ Сохранено в Notion:\n{notion_url}", parse_mode='HTML')
+                else:
+                    await update.message.reply_text("⚠️ Не удалось сохранить в Notion (возможно, нет подходящих полей)", parse_mode='HTML')
             except Exception as e:
                 logger.error(f"Ошибка сохранения FF в Notion: {e}")
+                await update.message.reply_text(f"⚠️ Ошибка сохранения в Notion: {str(e)[:100]}", parse_mode='HTML')
         
         save_session()
         return ConversationHandler.END
@@ -2911,43 +2971,60 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     final_total_amd = total_client_amd + commission_amd
     profit_amd = total_client_amd - total_purchase_amd
     
+    # ID расчета
+    calc_id = f"{client.upper().replace(' ', '-')}-{datetime.now().strftime('%y%m%d')}"
+    
     # Оптимизация коробок
     boxes_optimized = optimize_boxes([{'name': i['name'], 'qty': i['qty'], 'dims': i['dims'], 'volume': i['dims'][0]*i['dims'][1]*i['dims'][2]} for i in items])
     total_boxes = len(boxes_optimized)
     
-    # Формируем сообщение для клиента
-    msg_client = f'<b>Товары:</b>\n'
+    # === ШАБЛОН 1: ДЛЯ КЛИЕНТА ===
+    msg_client = f"<b>Клиент:</b> {client}\n"
+    msg_client += f"📅 <b>Дата:</b> {datetime.now().strftime('%d.%m.%Y')}\n\n"
+    
+    msg_client += "📦 <b>ДЕТАЛИЗАЦИЯ ЗАКАЗА</b>\n"
     for item in items:
         subtotal = item['qty'] * item['price']
-        item_total = subtotal + item['delivery_factory']
-        msg_client += (
-            f"• {item['name']}: {item['qty']} шт × {item['price']}¥ = {subtotal:.1f}¥"
-            f" + {item['delivery_factory']}¥ = {item_total:.1f}¥\n"
-        )
+        msg_client += f"• {item['name']} — {item['qty']} шт × {item['price']}¥\n"
+        msg_client += f"  Сумма: {subtotal:,.1f}¥ | Доставка: {item['delivery_factory']}¥\n"
     
-    msg_client += '━━━━━━━━━━\n'
-    msg_client += f'<b>Товар:</b> {total_client_cny:.1f}¥\n'
-    msg_client += f'<b>Доставка:</b> {total_delivery_cny:.1f}¥\n'
-    msg_client += f'<b>Курс:</b> {client_rate}\n'
-    msg_client += '━━━━━━━━━━\n'
-    msg_client += f'<b>Итого:</b> {total_cny:.1f}¥ = {total_client_amd:,.0f} AMD\n'
-    msg_client += f'<b>Комиссия:</b> {commission_amd:,.0f} AMD\n'
-    msg_client += '━━━━━━━━━━\n'
-    msg_client += f'<b>К ОПЛАТЕ:</b> {final_total_amd:,.0f} AMD'
+    msg_client += "\n📊 <b>ИТОГО В ЮАНЯХ</b>\n"
+    msg_client += f"Товар: {total_client_cny:,.1f}¥\n"
+    msg_client += f"Логистика: {total_delivery_cny:,.1f}¥\n"
+    msg_client += "<code>———————————————</code>\n"
+    msg_client += f"<b>ВСЕГО:</b> {total_cny:,.1f}¥\n\n"
     
-    # Формируем сообщение для себя (админ)
-    msg_admin = f'📦 <b>Коробки:</b> {total_boxes} шт\n\n'
+    msg_client += f"💱 <b>КОНВЕРТАЦИЯ (Курс {client_rate})</b>\n"
+    msg_client += f"Сумма: {total_client_amd:,.0f} AMD\n"
+    msg_client += f"Комиссия: {commission_amd:,.0f} AMD\n\n"
     
-    msg_admin += '<b>💰 Расчёт:</b>\n'
-    msg_admin += f'Клиенту: {total_client_amd:,.0f} AMD\n'
-    msg_admin += f'Закупка: {total_purchase_amd:,.0f} AMD\n'
+    msg_client += f"✅ <b>К ОПЛАТЕ: {final_total_amd:,.0f} AMD</b>"
+    
+    # === ШАБЛОН 2: ВНУТРЕННИЙ РАСЧЕТ ===
+    msg_admin = f"💼 <b>ID РАСЧЕТА:</b> {calc_id}\n\n"
+    
+    msg_admin += f"🏦 <b>ЗАКУП (Курс {real_rate}):</b>\n"
+    msg_admin += f"• Расход: {total_purchase_cny + total_delivery_cny:,.0f}¥\n"
+    msg_admin += f"• В драмах: {total_purchase_amd:,.0f} AMD\n\n"
+    
+    msg_admin += f"💰 <b>ОТ КЛИЕНТА (Курс {client_rate}):</b>\n"
+    msg_admin += f"• Оплата: {total_cny:,.0f}¥\n"
+    msg_admin += f"• В драмах: {total_client_amd:,.0f} AMD\n"
     if commission_amd == min_commission:
-        msg_admin += f'Комиссия {commission_pct}% = {total_client_amd * commission_pct / 100:,.0f} AMD → минимум {commission_amd:,.0f} AMD\n'
+        msg_admin += f"• Комиссия: {commission_amd:,.0f} AMD (минимум)\n"
     else:
-        msg_admin += f'Комиссия {commission_pct}%: {commission_amd:,.0f} AMD\n'
-    msg_admin += '━━━━━━━━━━\n'
-    msg_admin += f'<b>К ОПЛАТЕ:</b> {final_total_amd:,.0f} AMD\n'
-    msg_admin += f'<b>Прибыль:</b> {profit_amd:,.0f} AMD'
+        msg_admin += f"• Комиссия: {commission_amd:,.0f} AMD ({commission_pct}%)\n"
+    msg_admin += f"• Всего зашло: {final_total_amd:,.0f} AMD\n\n"
+    
+    msg_admin += "📈 <b>АНАЛИЗ ПРИБЫЛИ:</b>\n"
+    rate_diff = client_rate - real_rate
+    rate_profit = (total_purchase_cny + total_delivery_cny) * rate_diff
+    msg_admin += f"• Доход с курса: {rate_profit:,.0f} AMD (разница {rate_diff})\n"
+    commission_profit = final_total_amd - total_client_amd
+    msg_admin += f"• Доход с комиссии: {commission_profit:,.0f} AMD\n"
+    msg_admin += f"• <b>ИТОГО ПРОФИТ: {profit_amd + commission_profit:,.0f} AMD</b>\n\n"
+    
+    msg_admin += f"📦 Коробки: {total_boxes} шт"
     
     # Кнопки действий
     keyboard = [
