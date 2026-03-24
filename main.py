@@ -2994,26 +2994,29 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     boxes_optimized = optimize_boxes([{'name': i['name'], 'qty': i['qty'], 'dims': i['dims'], 'volume': i['dims'][0]*i['dims'][1]*i['dims'][2]} for i in items])
     total_boxes = len(boxes_optimized)
     
-    # === ШАБЛОН 1: ДЛЯ КЛИЕНТА ===
-    msg_client = f"<b>Клиент:</b> {client}\n"
-    msg_client += f"📅 <b>Дата:</b> {datetime.now().strftime('%d.%m.%Y')}\n\n"
+    # === КОММЕРЧЕСКИЙ ИНВОЙС ===
+    msg_client = f"<b>COMMERCIAL INVOICE: {client.upper()}</b>\n"
+    msg_client += f"📅 <b>Date:</b> {datetime.now().strftime('%d.%m.%Y')}\n\n"
     
-    msg_client += "📦 <b>ДЕТАЛИЗАЦИЯ ЗАКАЗА</b>\n"
+    msg_client += "<b>1. ТОВАРНАЯ ВЕДОМОСТЬ (Netto)</b>\n"
     for item in items:
         subtotal = item['qty'] * item['price']
-        msg_client += f"• {item['name']} — {item['qty']} шт × {item['price']}¥\n"
-        msg_client += f"  Сумма: {subtotal:,.1f}¥ | Доставка: {item['delivery_factory']}¥\n"
+        msg_client += f"• {item['name']} — {item['qty']} шт | {subtotal:,.1f}¥\n"
     
-    msg_client += "\n📊 <b>ИТОГО В ЮАНЯХ</b>\n"
-    msg_client += f"Товар: {total_client_cny:,.1f}¥\n"
-    msg_client += f"Логистика: {total_delivery_cny:,.1f}¥\n"
-    msg_client += "<code>———————————————</code>\n"
-    msg_client += f"<b>ВСЕГО:</b> {total_cny:,.1f}¥\n\n"
+    msg_client += "<code>────────────────────────</code>\n"
+    msg_client += f"<b>Subtotal (Стоимость товара):</b> {total_client_cny:,.1f}¥\n\n"
     
-    msg_client += f"💱 <b>КОНВЕРТАЦИЯ (Курс {client_rate})</b>\n"
-    msg_client += f"Сумма: {total_client_amd:,.0f} AMD\n"
-    msg_client += f"Комиссия: {commission_amd:,.0f} AMD\n\n"
+    msg_client += "<b>2. ЛОГИСТИКА И СОПУТСТВУЮЩИЕ РАСХОДЫ</b>\n"
+    fee_3pct = total_client_cny * 0.03
+    total_logistics = total_delivery_cny + fee_3pct
+    msg_client += f"• Доставка по Китаю (Local Delivery): {total_delivery_cny:,.1f}¥\n"
+    msg_client += f"• Комиссия: {fee_3pct:,.1f}¥\n"
+    msg_client += "<code>────────────────────────</code>\n"
+    msg_client += f"<b>Total Logistics:</b> {total_logistics:,.1f}¥\n\n"
     
+    msg_client += "<b>3. ИТОГОВЫЙ РАСЧЕТ (Convertation)</b>\n"
+    msg_client += f"• Всего к оплате: {total_cny:,.1f}¥\n"
+    msg_client += f"• Курс обмена (Exchange Rate): {client_rate}\n"
     msg_client += f"✅ <b>К ОПЛАТЕ: {final_total_amd:,.0f} AMD</b>"
     
     # === ШАБЛОН 2: ВНУТРЕННИЙ РАСЧЕТ ===
@@ -3040,13 +3043,17 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_admin += f"• Доход с комиссии: {commission_profit:,.0f} AMD\n"
     msg_admin += f"• <b>ИТОГО ПРОФИТ: {profit_amd + commission_profit:,.0f} AMD</b>\n\n"
     
-    msg_admin += f"📦 Коробки: {total_boxes} шт"
+    msg_admin += f"📦 Коробки: {total_boxes} шт\n\n"
     
-    # Кнопки действий
+    # Добавляем команды для следующих шагов
+    msg_admin += "<b>Далее:</b>\n"
+    msg_admin += "💾 <b>Сохранить</b> — нажми кнопку ниже\n"
+    msg_admin += "📦 <b>Рассчитать FF</b> — напиши /ff\n"
+    msg_admin += "🚚 <b>Рассчитать доставку</b> — напиши /dostavka"
+    
+    # Кнопка только для сохранения (она работает внутри paste_callback_handler)
     keyboard = [
         [InlineKeyboardButton("💾 Сохранить в Notion", callback_data=f'paste_save_{uid}')],
-        [InlineKeyboardButton("📦 Расчитать FF", callback_data=f'paste_ff_{uid}')],
-        [InlineKeyboardButton("🚚 Расчитать доставку", callback_data=f'paste_dostavka_{uid}')],
     ]
     
     # Сохраняем в сессию
@@ -3125,50 +3132,14 @@ async def paste_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             else:
                 await query.edit_message_text('❌ Notion не настроен')
         
-        elif data.startswith('paste_ff_'):
-            logger.info(f"PASTE ff: uid={uid}, items={len(items)}")
-            # Конвертируем в формат /ff
-            orders[uid]['type'] = 'ff'
-            orders[uid]['ff_bundles'] = []
-            orders[uid]['ff_single_items'] = []
-            orders[uid]['ff_items_in_bundles'] = set()
-            
-            # Преобразуем items в формат с dims
-            for item in items:
-                item['dims'] = item.get('dims', (0, 0, 0))
-                item['dimensions'] = item.get('dimensions', '')
-                item['is_bundle'] = False
-                item['bundle_name'] = None
-            
-            logger.info(f"PASTE ff: converted {len(items)} items, calling cmd_ff")
-            await query.edit_message_text('📦 Перехожу к расчёту FF...')
-            
-            # Вызываем cmd_ff напрямую — она проверит orders[uid] и покажет меню
-            result = await cmd_ff(update, context)
-            logger.info(f"PASTE ff: cmd_ff returned {result}")
-            return result
-        
-        elif data.startswith('paste_dostavka_'):
-            logger.info(f"PASTE dostavka: uid={uid}")
-            # Конвертируем в формат /dostavka
-            orders[uid]['type'] = 'dostavka'
-            
-            for item in items:
-                item['dims'] = item.get('dims', (0, 0, 0))
-                item['dimensions'] = item.get('dimensions', '')
-            
-            await query.edit_message_text('🚚 Перехожу к расчёту доставки...')
-            # TODO: запустить dostavka flow
-            return
+        else:
+            logger.warning(f"PASTE callback: unknown data={data}")
+            await query.edit_message_text('❌ Неизвестная команда')
             
     except Exception as e:
         logger.error(f"Ошибка в paste_callback_handler: {e}")
         logger.error(traceback.format_exc())
         await query.edit_message_text(f'❌ Ошибка: {str(e)[:200]}')
-        
-        await query.edit_message_text('🚚 Перехожу к расчёту доставки...')
-        # Вызываем dostavka (нужно добавить соответствующую функцию)
-        await start_dostavka(update, context)
 
 # ======== MAIN ========
 
