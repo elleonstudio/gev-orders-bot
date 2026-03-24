@@ -47,7 +47,6 @@ def get_code(client):
     return f"{client.upper().replace(' ', '-')}-{datetime.now().strftime('%y%m%d')}"
 
 def optimize_boxes(items):
-    """Считает сколько коробок 60x40x40 понадобится для всех товаров"""
     MAX_L, MAX_W, MAX_H = 60, 40, 40
     BOX_VOLUME = MAX_L * MAX_W * MAX_H
     all_items = []
@@ -86,13 +85,15 @@ async def get_packages_from_notion():
         packages = []
         for page in res.get('results', []):
             props = page['properties']
-            name = props.get('Название', {}).get('title', [{}])[0].get('text', {}).get('content', '')
-            price = props.get('Цена', {}).get('number', 0)
-            l, w, h = props.get('Длина', {}).get('number', 0), props.get('Ширина', {}).get('number', 0), props.get('Высота', {}).get('number', 0)
-            if name and price:
-                packages.append({'name': name, 'price': price, 'l': l, 'w': w, 'h': h, 'volume': l*w*h})
+            title_prop = props.get('Название', {}).get('title', [])
+            name = title_prop[0].get('text', {}).get('content', '') if title_prop else ''
+            price = props.get('Цена', {}).get('number') or 0
+            if name and price > 0:
+                packages.append({'name': name, 'price': price})
         return packages
-    except: return []
+    except Exception as e:
+        logger.error(f"Error reading packages: {e}")
+        return []
 
 async def get_client_orders_from_notion(client_name):
     if not notion or not NOTION_DATABASE_ID: return None, "Notion не настроен"
@@ -158,7 +159,8 @@ async def save_to_notion(uid):
         if 'rub_rate' in data: properties["Курс ₽→драм"] = {"number": float(data['rub_rate'])}
 
         page_id = data.get('notion_page_id')
-        if page_id: res = notion.pages.update(page_id=page_id, properties=properties)
+        if page_id: 
+            res = notion.pages.update(page_id=page_id, properties=properties)
         else:
             res = notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=properties)
             orders[uid]['notion_page_id'] = res['id']
@@ -209,7 +211,6 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_delivery_cny = sum(i.get('delivery_factory', 0) for i in items)
     total_cny = total_price_cny + total_delivery_cny
     
-    # 10000 AMD правило
     commission_cny_base = total_cny * 0.03
     commission_amd_calc = commission_cny_base * client_rate
     
@@ -273,12 +274,34 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Напиши /ff или /dostavka для продолжения."""
 
     await update.message.reply_text(msg_client, parse_mode='HTML')
-    await update.message.reply_text(msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💾 Сохранить в Notion", callback_data='paste_save')]]))
+
+    # Проверка клиента в базе
+    client_orders, _ = await get_client_orders_from_notion(client)
+    keyboard = []
+    
+    if client_orders:
+        orders[uid]['existing_notion_page_id'] = client_orders[0]['id']
+        last_date = client_orders[0].get('date', 'неизвестно')
+        msg_admin += f"\n\n⚠️ <b>Клиент найден в базе!</b> (Заказ от: {last_date})"
+        keyboard.append([InlineKeyboardButton("🔄 Обновить старый заказ", callback_data='paste_update')])
+        keyboard.append([InlineKeyboardButton("➕ Сохранить как НОВЫЙ", callback_data='paste_new')])
+    else:
+        keyboard.append([InlineKeyboardButton("💾 Сохранить в Notion", callback_data='paste_new')])
+
+    await update.message.reply_text(msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def paste_save_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
+    
+    if query.data == 'paste_update':
+        orders[uid]['notion_page_id'] = orders[uid].get('existing_notion_page_id')
+        action = "Обновлен старый заказ"
+    else:
+        orders[uid]['notion_page_id'] = None
+        action = "Создан новый заказ"
+        
     url = await save_to_notion(uid)
-    await query.edit_message_text(f"✅ Сохранено:\n{url}" if url else "⚠️ Ошибка Notion")
+    await query.edit_message_text(f"✅ {action}:\n{url}" if url else "⚠️ Ошибка Notion")
     save_session()
 
 # --- /ZAKAZ КОМАНДА ---
@@ -495,7 +518,7 @@ async def ff_box_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         orders[uid]['ff_boxes_total'] = total_boxes * box_price
         
-        await update.message.reply_text(f"Коробок: {total_boxes}. Коробки: {total_boxes * box_price}¥\n\nНапиши стоимость сборки/работы для ВСЕХ одиночных товаров (¥) или 0:")
+        await update.message.reply_text(f"Коробок: {total_boxes}. Стоимость коробок: {total_boxes * box_price}¥\n\nНапиши стоимость сборки/работы для ВСЕХ одиночных товаров суммарно (¥) или 0:")
         return F_SUMMARY
     except:
         await update.message.reply_text("Число! Цена за 1 коробку:")
@@ -511,9 +534,8 @@ async def show_single_item(update_or_query, uid):
     item_idx, item = available[idx]
     l, w, h = item.get('dims', (0,0,0))
     
-    # Запрос размеров если их нет
     if (l, w, h) == (0, 0, 0):
-        msg = f"⚠️ У товара <b>{item['name']}</b> нет размеров!\n\nВведи размеры 1 шт (Д Ш В в см):\nНапример: 15 10 5"
+        msg = f"⚠️ Товар: <b>{item['name']}</b>\n\nВведи размеры товара 1 шт (Д Ш В в см), чтобы бот посчитал, сколько влезет в коробку:\nНапример: 15 10 5"
         if hasattr(update_or_query, 'edit_message_text'):
             await update_or_query.edit_message_text(msg, parse_mode='HTML')
         else:
@@ -523,7 +545,7 @@ async def show_single_item(update_or_query, uid):
     packages = await get_packages_from_notion()
     orders[uid]['ff_available_packages'] = packages
     
-    msg = f"📦 Товар {idx+1}/{len(available)}: <b>{item['name']}</b>\nРазмеры: {l}x{w}x{h} | Кол-во: {item['qty']}\n\nВыбери пакет:"
+    msg = f"📦 Товар {idx+1}/{len(available)}: <b>{item['name']}</b>\nРазмеры: {l}x{w}x{h} | Кол-во: {item['qty']}\n\nВыбери пакет для упаковки:"
     keyboard = [[InlineKeyboardButton(f"📦 {p['name']} — {p['price']}¥", callback_data=f'ff_s_pkg_{i}')] for i, p in enumerate(packages)]
     keyboard.append([InlineKeyboardButton("💰 Своя цена", callback_data='ff_s_custom')])
     
@@ -542,7 +564,6 @@ async def ff_single_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = orders[uid]['ff_single_index']
         item_idx, item = orders[uid]['ff_single_available'][idx]
         
-        # Обновляем размеры
         orders[uid]['ff_single_available'][idx][1]['dims'] = dims
         orders[uid]['items'][item_idx]['dims'] = dims
         
@@ -615,7 +636,7 @@ async def ff_bundle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ff_bundle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id); orders[uid]['ff_b_name'] = update.message.text.strip()
-    await update.message.reply_text("Размеры набора (Д Ш В в см):"); return F_BUNDLE_DIMS
+    await update.message.reply_text("Размеры готового набора (Д Ш В в см):\nЭти размеры нужны для расчета коробок"); return F_BUNDLE_DIMS
 
 async def ff_bundle_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id); orders[uid]['ff_b_dims'] = tuple(map(float, update.message.text.split()))
@@ -708,7 +729,7 @@ async def d_boxes(update, context):
     boxes = int(update.message.text); city = orders[uid]['current_wh']
     
     if city == 'Свой тариф':
-        await update.message.reply_text("Этот склад требует ручного тарифа (В разработке). Выбери другой через /dostavka"); return ConversationHandler.END
+        await update.message.reply_text("Этот склад требует ручного тарифа. Выбери другой через /dostavka"); return ConversationHandler.END
         
     cost = TARIFFS[city] * boxes
     orders[uid]['warehouses'].append({'city': city, 'boxes': boxes, 'cost': cost})
@@ -741,7 +762,7 @@ def main():
     
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('paste', cmd_paste))
-    app.add_handler(CallbackQueryHandler(paste_save_cb, pattern='^paste_save$'))
+    app.add_handler(CallbackQueryHandler(paste_save_cb, pattern='^paste_new$|^paste_update$'))
     
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler('zakaz', cmd_zakaz)],
@@ -789,7 +810,7 @@ def main():
         fallbacks=[CommandHandler('cancel', lambda u,c: ConversationHandler.END)]
     ))
 
-    logger.info("Бот успешно запущен. Версия v42 (Final Complete Architecture)")
+    logger.info("Бот запущен. Версия v44 (Complete & Fixed)")
     app.run_polling()
 
 if __name__ == '__main__': main()
