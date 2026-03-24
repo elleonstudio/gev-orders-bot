@@ -1135,13 +1135,22 @@ async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client_orders, error = await get_client_orders_from_notion(client_name)
         
         if client_orders is None:
-            # Ошибка при получении
+            # Ошибка при получении — всё равно позволяем создать новый заказ
             logger.error(f"Ошибка получения заказов: {error}")
+            orders[uid] = {
+                'client': client_name,
+                'items': [],
+                'type': 'ff',
+                'all_client_orders': []
+            }
             await update.message.reply_text(
-                f'⚠️ Notion временно недоступен.\n'
-                f'Для нового заказа сначала выполни /zakaz {client_name}'
+                f'⚠️ Не удалось загрузить заказы из Notion ({error})\n\n'
+                f'Клиент: <b>{client_name}</b>\n'
+                f'Начинаем новый расчёт FF.',
+                parse_mode='HTML'
             )
-            return ConversationHandler.END
+            await start_ff(update, context, uid)
+            return F_PACKAGES
         
         # Инициализируем сессию
         orders[uid] = {
