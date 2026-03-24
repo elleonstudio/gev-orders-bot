@@ -73,8 +73,8 @@ def get_code(client):
     return f"{client.upper().replace(' ', '-')}-{today.strftime('%y%m%d')}"
 
 def calculate_boxes(l, w, h, qty):
-    """Расчёт количества коробок с учётом макс. размеров"""
-    MAX_L, MAX_W, MAX_H = 60, 40, 40  # ИСПРАВЛЕНО: было 60,50,40
+    """Расчёт количества коробок с учётом макс. размеров 60×40×40"""
+    MAX_L, MAX_W, MAX_H = 60, 40, 40
     
     items_per_box_l = max(1, int(MAX_L // l))
     items_per_box_w = max(1, int(MAX_W // w))
@@ -83,6 +83,94 @@ def calculate_boxes(l, w, h, qty):
     
     boxes = math.ceil(qty / items_per_box)
     return items_per_box, boxes
+
+def optimize_boxes(items):
+    """
+    Оптимальная упаковка товаров в коробки.
+    Смешивает разные товары для минимизации количества коробок.
+    
+    items: список {'name': str, 'qty': int, 'dims': (l, w, h), 'volume': float}
+    
+    Возвращает: список коробок [{'items': [...], 'total_volume': float, 'dims': (L, W, H)}]
+    """
+    MAX_L, MAX_W, MAX_H = 60, 40, 40
+    BOX_VOLUME = MAX_L * MAX_W * MAX_H
+    
+    # Разбиваем все товары на единичные экземпляры с размерами
+    all_items = []
+    for item in items:
+        l, w, h = item['dims']
+        volume = l * w * h
+        for i in range(item['qty']):
+            all_items.append({
+                'name': item['name'],
+                'dims': (l, w, h),
+                'volume': volume,
+                'original_idx': len(all_items)
+            })
+    
+    # Сортируем по объёму (от большего к меньшему) для лучшей упаковки
+    all_items.sort(key=lambda x: x['volume'], reverse=True)
+    
+    # Алгоритм First Fit Decreasing
+    boxes = []
+    
+    for item in all_items:
+        l, w, h = item['dims']
+        placed = False
+        
+        # Пробуем поместить в существующую коробку
+        for box in boxes:
+            # Проверяем, влезает ли по объёму
+            if box['remaining_volume'] >= item['volume']:
+                # Проверяем, можно ли физически разместить
+                # Упрощённая проверка: по каждому измерению
+                can_fit = False
+                for rot_l, rot_w, rot_h in [
+                    (l, w, h), (l, h, w), (w, l, h), 
+                    (w, h, l), (h, l, w), (h, w, l)
+                ]:
+                    # Проверяем, есть ли место в коробке
+                    remaining_l = MAX_L - box['used_l']
+                    remaining_w = MAX_W - box['used_w']
+                    remaining_h = MAX_H - box['used_h']
+                    
+                    if rot_l <= remaining_l and rot_w <= remaining_w and rot_h <= remaining_h:
+                        can_fit = True
+                        box['used_l'] += rot_l
+                        box['used_w'] += rot_w
+                        box['used_h'] += rot_h
+                        break
+                
+                if can_fit:
+                    box['items'].append(item)
+                    box['remaining_volume'] -= item['volume']
+                    placed = True
+                    break
+        
+        # Если не поместилось — создаём новую коробку
+        if not placed:
+            boxes.append({
+                'items': [item],
+                'total_volume': BOX_VOLUME,
+                'remaining_volume': BOX_VOLUME - item['volume'],
+                'used_l': l,
+                'used_w': w,
+                'used_h': h,
+                'dims': (MAX_L, MAX_W, MAX_H)
+            })
+    
+    return boxes
+
+def calculate_boxes_optimized(items):
+    """
+    Расчёт коробок с оптимизацией.
+    items: список {'name': str, 'qty': int, 'dims': (l, w, h)}
+    
+    Возвращает: (total_boxes, boxes_details)
+    """
+    boxes = optimize_boxes(items)
+    return len(boxes), boxes
 
 async def get_packages_from_notion():
     """Получаем пакеты из базы Notion"""
@@ -114,116 +202,99 @@ def find_best_package(packages, l, w, h):
     return min(suitable, key=lambda p: p['volume'])
 
 async def get_client_orders_from_notion(client_name):
-    """Получаем все заказы клиента из Notion с обработкой ошибок (case-insensitive)"""
+    """Получаем все заказы клиента из Notion с обработкой ошибок (регистронезависимый поиск)"""
     if not notion or not NOTION_DATABASE_ID:
         return None, "Notion не настроен"
     
     try:
-        # Получаем больше заказов и фильтруем вручную (case-insensitive)
+        # Получаем последние 100 записей (без фильтра для case-insensitive поиска)
         res = notion.databases.query(
             database_id=NOTION_DATABASE_ID,
             sorts=[{"timestamp": "created_time", "direction": "descending"}],
             page_size=100
         )
         
-        orders_list = []
-        client_name_lower = client_name.lower().strip()
-        all_clients = []  # ДЕБАГ: список всех клиентов
-        
+        # Фильтруем в Python с case-insensitive сравнением
+        client_name_lower = client_name.lower()
+        filtered_results = []
         for page in res.get('results', []):
             props = page['properties']
-            # Получаем имя клиента из заказа
-            order_client = props.get('Клиент', {}).get('select', {}).get('name', '')
-            all_clients.append(order_client)  # ДЕБАГ
+            # Получаем имя клиента из select поля
+            client_select = props.get('Клиент', {})
+            if client_select.get('select'):
+                notion_client_name = client_select['select'].get('name', '')
+                # Case-insensitive сравнение
+                if notion_client_name.lower() == client_name_lower:
+                    filtered_results.append(page)
+        
+        orders_list = []
+        for page in filtered_results[:10]:  # Берём только первые 10 совпадений
+            props = page['properties']
+            created = page.get('created_time', '')[:10]
+            # Безопасное получение описания (может быть пустым)
+            rich_text = props.get('Описание товара', {}).get('rich_text', [])
+            items_text = rich_text[0].get('text', {}).get('content', '') if rich_text else ''
+            items_list = []
+            seen_names = set()  # Для дедупликации
+            for item_str in items_text.split(';'):
+                item_str = item_str.strip()
+                if item_str:
+                    # Пробуем разные форматы: "Name × 100", "Name x 100", "Name 100"
+                    name = item_str
+                    qty = 0
+                    
+                    # Ищем × ( multiplication sign)
+                    if '×' in item_str:
+                        parts = item_str.rsplit('×', 1)
+                        name = parts[0].strip()
+                        try:
+                            qty = int(parts[1].strip().split()[0])  # Берём только число
+                        except:
+                            qty = 0
+                    # Ищем x (латинская)
+                    elif ' x ' in item_str.lower():
+                        parts = item_str.lower().rsplit(' x ', 1)
+                        name = item_str[:item_str.lower().rfind(' x ')].strip()
+                        try:
+                            qty = int(parts[1].strip().split()[0])
+                        except:
+                            qty = 0
+                    # Пробуем взять последнее число как количество
+                    else:
+                        numbers = re.findall(r'\d+', item_str)
+                        if numbers:
+                            try:
+                                qty = int(numbers[-1])
+                                # Убираем число из названия
+                                name = re.sub(r'\s*\d+\s*$', '', item_str).strip()
+                            except:
+                                qty = 0
+                    
+                    # Пропускаем дубликаты по названию
+                    if name and name not in seen_names:
+                        seen_names.add(name)
+                        items_list.append({'name': name, 'qty': qty})
             
-            # Case-insensitive сравнение (strip для удаления лишних пробелов)
-            if order_client and order_client.lower().strip() == client_name_lower:
-                created = page.get('created_time', '')[:10]
-                # Безопасное получение описания (может быть пустым)
-                rich_text = props.get('Описание товара', {}).get('rich_text', [])
-                items_text = rich_text[0].get('text', {}).get('content', '') if rich_text else ''
-                items_list = []
-                seen_names = set()  # Для дедупликации
-                for item_str in items_text.split(';'):
-                    item_str = item_str.strip()
-                    if item_str:
-                        # Пробуем разные форматы: "Name × 100", "Name x 100", "Name 100"
-                        name = item_str
-                        qty = 0
-                        
-                        # Ищем × (multiplication sign)
-                        if '×' in item_str:
-                            parts = item_str.rsplit('×', 1)
-                            name = parts[0].strip()
-                            try:
-                                qty = int(parts[1].strip().split()[0])  # Берём только число
-                            except:
-                                qty = 0
-                        # Ищем x (латинская)
-                        elif ' x ' in item_str.lower():
-                            parts = item_str.lower().rsplit(' x ', 1)
-                            name = item_str[:item_str.lower().rfind(' x ')].strip()
-                            try:
-                                qty = int(parts[1].strip().split()[0])
-                            except:
-                                qty = 0
-                        # Пробуем взять последнее число как количество
-                        else:
-                            numbers = re.findall(r'\d+', item_str)
-                            if numbers:
-                                try:
-                                    qty = int(numbers[-1])
-                                    # Убираем число из названия
-                                    name = re.sub(r'\s*\d+\s*$', '', item_str).strip()
-                                except:
-                                    qty = 0
-                        
-                        # Пропускаем дубликаты по названию
-                        if name and name not in seen_names:
-                            seen_names.add(name)
-                            items_list.append({'name': name, 'qty': qty})
-                
-                # Получаем размеры из Notion (безопасно)
-                dims_rich = props.get('Размеры (Д×Ш×В)', {}).get('rich_text', [])
-                dimensions_str = dims_rich[0].get('text', {}).get('content', '') if dims_rich else ''
-                dims = (0, 0, 0)
-                if dimensions_str and '×' in dimensions_str:
-                    try:
-                        dim_parts = dimensions_str.split('×')
-                        if len(dim_parts) == 3:
-                            dims = (float(dim_parts[0]), float(dim_parts[1]), float(dim_parts[2]))
-                    except:
-                        dims = (0, 0, 0)
-                
-                # Добавляем размеры к каждому товару
-                for item in items_list:
-                    item['dimensions'] = dimensions_str
-                    item['dims'] = dims
-                
-                order = {
-                    'id': page['id'],
-                    'code': props.get('Код заказа', {}).get('title', [{}])[0].get('text', {}).get('content', '') if props.get('Код заказа', {}).get('title') else '',
-                    'date': created,
-                    'client_rate': props.get('Курс клиенту', {}).get('number'),
-                    'real_rate': props.get('Курс реальный', {}).get('number'),
-                    'rub_rate': props.get('Курс ₽→драм', {}).get('number'),
-                    'items_text': items_text,
-                    'items': items_list,
-                    'total': props.get('К ОПЛАТЕ (AMD)', {}).get('number') or props.get('Прибыль (AMD)', {}).get('number'),
-                }
-                orders_list.append(order)
-        
-        # ДЕБАГ: логируем что нашли
-        logger.info(f"Поиск клиента: '{client_name}' (всего заказов в Notion: {len(res.get('results', []))})")
-        logger.info(f"Найдено заказов: {len(orders_list)}")
-        logger.info(f"Все клиенты в базе: {list(set(all_clients))[:20]}")  # Первые 20 уникальных
-        
+            # Безопасное получение кода заказа
+            title_list = props.get('Код заказа', {}).get('title', [])
+            code_text = title_list[0].get('text', {}).get('content', '') if title_list else ''
+            
+            order = {
+                'id': page['id'],
+                'code': code_text,
+                'date': created,
+                'client_rate': props.get('Курс клиенту', {}).get('number'),
+                'real_rate': props.get('Курс реальный', {}).get('number'),
+                'rub_rate': props.get('Курс ₽→драм', {}).get('number'),
+                'items_text': items_text,
+                'items': items_list,
+                'total': props.get('К ОПЛАТЕ (AMD)', {}).get('number') or props.get('Прибыль (AMD)', {}).get('number'),
+            }
+            orders_list.append(order)
         return orders_list, None
     except Exception as e:
-        error_str = str(e)
-        error_msg = f"{type(e).__name__}: {error_str}"
+        error_msg = f"{type(e).__name__}: {str(e)}"
         logger.error(f"Error fetching client orders: {error_msg}")
-        return None, error_msg
         logger.error(traceback.format_exc())
         return None, error_msg
 
@@ -251,7 +322,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         notion_status = f"⚠️ Notion: {error[:50]}..." if len(error) > 50 else f"⚠️ Notion: {error}"
     
     menu = (
-        f"🤖 <b>GS Orders Bot</b>\n"
+        f"🤖 <b>GS Orders Bot v40</b>\n"
         f"{notion_status}\n\n"
         "📋 <b>/zakaz [имя]</b> — Новый заказ\n"
         "📦 <b>/ff</b> — FF Китай\n"
@@ -276,7 +347,7 @@ async def check_notion_access():
 
 # ======== /ZAKAZ ========
 
-Z_INVOICE, Z_SELECT_ORDER, Z_ORDER_ACTION, Z_SELECT_ITEMS, Z_EDIT_ITEM_QTY, Z_NAME, Z_QTY, Z_PRICE, Z_PURCHASE, Z_DELIVERY, Z_BUNDLE_SELECT, Z_BUNDLE_NEW, Z_DIMS, Z_MORE, Z_CLIENT_RATE, Z_REAL_RATE, Z_COMMISSION = range(17)
+Z_INVOICE, Z_SELECT_ORDER, Z_ORDER_ACTION, Z_SELECT_ITEMS, Z_EDIT_ITEM_QTY, Z_NAME, Z_QTY, Z_PRICE, Z_PURCHASE, Z_DELIVERY, Z_BUNDLE_SELECT, Z_BUNDLE_NEW, Z_BUNDLE_NEW_FROM_CURRENT, Z_DIMS, Z_MORE, Z_CLIENT_RATE, Z_REAL_RATE, Z_COMMISSION = range(18)
 
 async def cmd_zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -734,16 +805,26 @@ async def z_get_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = []
         
-        # Кнопки существующих наборов
+        # Если есть активный набор, показываем его первым с пометкой
+        active_bundle = orders[uid].get('active_bundle')
+        if active_bundle and active_bundle in existing_bundles:
+            keyboard.append([InlineKeyboardButton(f"🔄 Продолжить: {active_bundle}", callback_data=f'z_bundle_existing_{active_bundle}')])
+            keyboard.append([InlineKeyboardButton("❌ Выйти из набора", callback_data='z_bundle_exit')])
+        
+        # Остальные существующие наборы (кроме активного)
         for bundle in existing_bundles:
-            keyboard.append([InlineKeyboardButton(f"📦 {bundle}", callback_data=f'z_bundle_existing_{bundle}')])
+            if bundle != active_bundle:
+                keyboard.append([InlineKeyboardButton(f"📦 {bundle}", callback_data=f'z_bundle_existing_{bundle}')])
         
         # Основные кнопки
-        keyboard.append([InlineKeyboardButton("➕ Новый набор", callback_data='z_bundle_new')])
         keyboard.append([InlineKeyboardButton("📦 По одиночке", callback_data='z_bundle_single')])
+        keyboard.append([InlineKeyboardButton("📦➡️📦 Сделать набором из этого товара", callback_data='z_bundle_make_from_current')])
+        keyboard.append([InlineKeyboardButton("➕ Новый пустой набор", callback_data='z_bundle_new')])
         
         msg = "📦 Что это за товар?\n\n"
-        if existing_bundles:
+        if active_bundle:
+            msg += f"Сейчас добавляем в: <b>{active_bundle}</b>\n\n"
+        elif existing_bundles:
             msg += "Существующие наборы в заказе:\n"
             for b in existing_bundles:
                 msg += f"• {b}\n"
@@ -752,7 +833,8 @@ async def z_get_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             msg,
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
         )
         return Z_BUNDLE_SELECT
     except:
@@ -772,12 +854,37 @@ async def z_bundle_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # Обычный товар
             orders[uid]['current']['bundle_name'] = None
             orders[uid]['current']['is_bundle'] = False
+            # Сбрасываем активный набор
+            if 'active_bundle' in orders[uid]:
+                del orders[uid]['active_bundle']
             await query.edit_message_text(
                 '📦 Обычный товар\n\n'
                 'Введи размеры 1 шт (Д Ш В в см):\n'
                 'Например: 15 10 8'
             )
             return Z_DIMS
+            
+        elif data == 'z_bundle_exit':
+            # Выйти из активного набора
+            if 'active_bundle' in orders[uid]:
+                del orders[uid]['active_bundle']
+            orders[uid]['current']['bundle_name'] = None
+            orders[uid]['current']['is_bundle'] = False
+            await query.edit_message_text(
+                '📦 Вышли из набора\n\n'
+                'Введи размеры 1 шт (Д Ш В в см):\n'
+                'Например: 15 10 8'
+            )
+            return Z_DIMS
+            
+        elif data == 'z_bundle_make_from_current':
+            # Сделать текущий товар частью нового набора
+            await query.edit_message_text(
+                '📦➡️📦 Сделать набором из этого товара\n\n'
+                'Введи имя набора:\n'
+                'Например: "Сет розовый", "Комбо A"'
+            )
+            return Z_BUNDLE_NEW_FROM_CURRENT
             
         elif data == 'z_bundle_new':
             # Новый набор - просим имя
@@ -793,6 +900,8 @@ async def z_bundle_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
             bundle_name = data.replace('z_bundle_existing_', '')
             orders[uid]['current']['bundle_name'] = bundle_name
             orders[uid]['current']['is_bundle'] = True
+            # Запоминаем активный набор для последующих товаров
+            orders[uid]['active_bundle'] = bundle_name
             await query.edit_message_text(
                 f'📦 Добавляем в набор: <b>{bundle_name}</b>\n\n'
                 f'Введи размеры этого товара (Д Ш В в см):\n'
@@ -807,7 +916,7 @@ async def z_bundle_select_cb(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
 async def z_bundle_new_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Создание нового набора - ввод имени"""
+    """Создание нового набора - ввод имени, цена устанавливается в /ff"""
     uid = str(update.effective_user.id)
     try:
         bundle_name = update.message.text.strip()
@@ -815,17 +924,62 @@ async def z_bundle_new_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text('Имя не может быть пустым. Введи имя набора:')
             return Z_BUNDLE_NEW
             
-        orders[uid]['current']['bundle_name'] = bundle_name
-        orders[uid]['current']['is_bundle'] = True
+        # Создаём "пустой" набор как контейнер
+        # Цена будет установлена в /ff при расчёте
+        orders[uid]['current'] = {
+            'name': bundle_name,
+            'bundle_name': None,  # Это сам набор, не товар в наборе
+            'is_bundle': True,
+            'dimensions': 'Набор',
+            'dims': (0, 0, 0),
+            'qty': 1,
+            'price': 0,  # Цена будет в /ff
+            'purchase': 0,
+            'delivery_factory': 0,
+            'items_per_box': 0,
+            'boxes': 0
+        }
+        
+        keyboard = [[InlineKeyboardButton("✅ Да", callback_data='z_more_yes'), 
+                     InlineKeyboardButton("❌ Нет", callback_data='z_more_no')]]
         await update.message.reply_text(
             f'📦 Новый набор: <b>{bundle_name}</b>\n\n'
-            f'Введи размеры упаковки для этого набора (Д Ш В в см):\n'
-            f'Эти размеры будут использоваться в /ff для выбора пакета',
+            f'Набор создан. Теперь добавь товары в этот набор.\n'
+            f'Ещё товар?',
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return Z_MORE
+    except Exception as e:
+        logger.error(f"Ошибка в z_bundle_new_name: {e}")
+        await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
+
+async def z_bundle_new_from_current_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Текущий товар становится первым в новом наборе"""
+    uid = str(update.effective_user.id)
+    try:
+        bundle_name = update.message.text.strip()
+        if not bundle_name:
+            await update.message.reply_text('Имя не может быть пустым. Введи имя набора:')
+            return Z_BUNDLE_NEW_FROM_CURRENT
+        
+        # Запоминаем активный набор
+        orders[uid]['active_bundle'] = bundle_name
+        
+        # Текущий товар теперь в наборе
+        orders[uid]['current']['bundle_name'] = bundle_name
+        orders[uid]['current']['is_bundle'] = True
+        
+        await update.message.reply_text(
+            f'📦 Товар добавлен в новый набор: <b>{bundle_name}</b>\n\n'
+            f'Введи размеры этого товара (Д Ш В в см):\n'
+            f'Нужно для расчёта коробок',
             parse_mode='HTML'
         )
         return Z_DIMS
     except Exception as e:
-        logger.error(f"Ошибка в z_bundle_new_name: {e}")
+        logger.error(f"Ошибка в z_bundle_new_from_current_name: {e}")
         await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
         return ConversationHandler.END
 
@@ -836,12 +990,59 @@ async def z_bundle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def z_get_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     text = update.message.text.strip()
+    logger.info(f"z_get_dims called for uid={uid}, text='{text}'")
+    
+    # Проверка на пропуск размеров (для услуг, цифровых товаров)
+    if text in ['-', '—', 'пропустить', 'skip', 'нет']:
+        logger.info(f"z_get_dims: skipping dimensions for uid={uid}")
+        
+        if uid not in orders:
+            logger.error(f"z_get_dims: uid {uid} not in orders")
+            await update.message.reply_text('Ошибка: сессия не найдена. Начни сначала: /zakaz')
+            return ConversationHandler.END
+            
+        current = orders[uid].get('current', {})
+        
+        if 'qty' not in current:
+            logger.error(f"z_get_dims: qty not in current")
+            await update.message.reply_text('Ошибка: количество не задано. Начни сначала: /zakaz')
+            return ConversationHandler.END
+        
+        # Устанавливаем нулевые размеры
+        current['dimensions'] = '—'
+        current['dims'] = (0, 0, 0)
+        current['items_per_box'] = 0
+        current['boxes'] = 0
+        
+        keyboard = [[InlineKeyboardButton("✅ Да", callback_data='z_more_yes'), 
+                     InlineKeyboardButton("❌ Нет", callback_data='z_more_no')]]
+        await update.message.reply_text(
+            '➕ Ещё товар?',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return Z_MORE
+    
     try:
         dims = [float(x) for x in text.split()]
         if len(dims) != 3:
-            raise ValueError
+            raise ValueError(f"Expected 3 dimensions, got {len(dims)}")
         l, w, h = dims
-        current = orders[uid]['current']
+        
+        # Проверяем что orders[uid] и current существуют
+        if uid not in orders:
+            logger.error(f"z_get_dims: uid {uid} not in orders")
+            await update.message.reply_text('Ошибка: сессия не найдена. Начни сначала: /zakaz')
+            return ConversationHandler.END
+            
+        current = orders[uid].get('current', {})
+        logger.info(f"z_get_dims: current={current}")
+        
+        # Проверяем что qty есть
+        if 'qty' not in current:
+            logger.error(f"z_get_dims: qty not in current")
+            await update.message.reply_text('Ошибка: количество не задано. Начни сначала: /zakaz')
+            return ConversationHandler.END
+            
         current['dimensions'] = f"{int(l)}×{int(w)}×{int(h)}"
         current['dims'] = (l, w, h)
         qty = current['qty']
@@ -850,42 +1051,73 @@ async def z_get_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current['items_per_box'] = items_per_box
         current['boxes'] = boxes
         
-        keyboard = [[InlineKeyboardButton("Да", callback_data='z_more_yes'), 
-                     InlineKeyboardButton("Нет", callback_data='z_more_no')]]
+        logger.info(f"z_get_dims: success, returning Z_MORE")
+        keyboard = [[InlineKeyboardButton("✅ Да", callback_data='z_more_yes'), 
+                     InlineKeyboardButton("❌ Нет", callback_data='z_more_no')]]
         await update.message.reply_text(
             f'📐 Размеры: {int(l)}×{int(w)}×{int(h)} см\n'
             f'📦 В короб влезет: ~{items_per_box} шт\n'
             f'📦 Коробок: {boxes}\n\n'
-            f'Ещё товар?',
+            f'➕ Ещё товар?',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return Z_MORE
-    except:
-        await update.message.reply_text('Неверный формат. Введи 3 числа:\n15 10 8')
+    except Exception as e:
+        logger.error(f"Ошибка в z_get_dims: {e}")
+        await update.message.reply_text('Неверный формат. Введи 3 числа (15 10 8) или "-" чтобы пропустить:')
         return Z_DIMS
+
+async def z_more_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка текстового ввода вместо нажатия кнопки Да/Нет"""
+    await update.message.reply_text('Нажми кнопку ✅ Да или ❌ Нет')
+    return Z_MORE
 
 async def z_more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = str(update.effective_user.id)
+    logger.info(f"z_more_cb called for uid={uid}, data={query.data}")
     
     try:
         current = orders[uid]['current']
         items = orders[uid]['items']
         
         # Добавляем текущий товар в список (если его ещё нет)
+        # Проверяем уникальность по комбинации name + bundle_name
         if current and current.get('name'):
-            existing_names = [i['name'] for i in items]
-            if current['name'] not in existing_names:
+            existing_keys = [(i['name'], i.get('bundle_name')) for i in items]
+            current_key = (current['name'], current.get('bundle_name'))
+            if current_key not in existing_keys:
                 items.append(current)
+                # Если это набор (контейнер), запоминаем его имя для следующих товаров
+                if current.get('is_bundle') and current.get('bundle_name') is None:
+                    orders[uid]['active_bundle'] = current['name']
+                    logger.info(f"Set active_bundle to {current['name']}")
         
         if query.data == 'z_more_yes':
             # Новый товар
-            orders[uid]['current'] = {}
-            await query.edit_message_text('Название товара:')
+            active_bundle = orders[uid].get('active_bundle')
+            if active_bundle:
+                # Если есть активный набор, создаём товар в этом наборе
+                orders[uid]['current'] = {
+                    'bundle_name': active_bundle,
+                    'is_bundle': False
+                }
+                await query.edit_message_text(
+                    f'📦 Добавляем в набор: <b>{active_bundle}</b>\n\n'
+                    f'Название товара:',
+                    parse_mode='HTML'
+                )
+            else:
+                # Обычный товар без набора
+                orders[uid]['current'] = {}
+                await query.edit_message_text('Название товара:')
             return Z_NAME
         else:
             # Закончили с товарами — идём к курсам
+            # Сбрасываем активный набор
+            if 'active_bundle' in orders[uid]:
+                del orders[uid]['active_bundle']
             if 'client_rate' in orders[uid]:
                 await query.edit_message_text(
                     f'Курс клиенту ¥→драм ({orders[uid]["client_rate"]}):\n(отправь новое число или "ok")'
@@ -1131,14 +1363,16 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
         return ConversationHandler.END
 
-# ======== /FF ========
+# ======== /FF v38 - НОВАЯ ЛОГИКА НАБОРОВ ========
 
-F_SELECT_ORDER, F_MAIN_MENU, F_SINGLE_ITEMS, F_BUNDLE_CREATE, F_BUNDLE_DIMS, F_BUNDLE_PACKAGE, F_PACKAGES, F_PACKAGE_PRICE, F_BOX_PRICE, F_THERMAL, F_WORK, F_BUNDLE_THERMAL, F_BUNDLE_WORK, F_SUMMARY = range(14)
+# Новые состояния для FF
+F_SELECT_ORDER, F_MAIN_MENU, F_SINGLE_ITEMS, F_BUNDLE_CREATE, F_BUNDLE_NAME, F_BUNDLE_DIMS, F_BUNDLE_PACKAGE, F_BUNDLE_THERMAL, F_BUNDLE_WORK, F_SUMMARY = range(10)
 
 async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Новая команда /ff с логикой выбора режима"""
     uid = str(update.effective_user.id)
     
-    # Если передано имя клиента — ищем в базе как /zakaz
+    # Если передано имя клиента — ищем в базе
     if context.args:
         client_name = ' '.join(context.args)
         
@@ -1146,48 +1380,9 @@ async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
         client_orders, error = await get_client_orders_from_notion(client_name)
         
         if client_orders is None:
-            # Ошибка при получении — всё равно позволяем создать новый заказ
-            logger.error(f"Ошибка получения заказов: {error}")
-            orders[uid] = {
-                'client': client_name,
-                'items': [],
-                'type': 'ff',
-                'all_client_orders': []
-            }
             await update.message.reply_text(
-                f'⚠️ Не удалось загрузить заказы из Notion ({error})\n\n'
-                f'Клиент: <b>{client_name}</b>\n'
-                f'Начинаем новый расчёт FF.',
-                parse_mode='HTML'
-            )
-            await start_ff(update, context, uid)
-            return F_PACKAGES
-        
-        # Если нет заказов — показываем какие клиенты есть для дебага
-        if not client_orders:
-            # Получаем список всех клиентов для проверки
-            all_clients = []
-            try:
-                res = notion.databases.query(
-                    database_id=NOTION_DATABASE_ID,
-                    page_size=100
-                )
-                for page in res.get('results', []):
-                    client = page['properties'].get('Клиент', {}).get('select', {}).get('name', '')
-                    if client:
-                        all_clients.append(client)
-                unique_clients = list(set(all_clients))[:10]  # Первые 10 уникальных
-            except:
-                unique_clients = []
-            
-            clients_list = '\n'.join([f'• {c}' for c in unique_clients]) if unique_clients else 'Не удалось получить список'
-            
-            await update.message.reply_text(
-                f'Клиент: <b>{client_name}</b>\n'
-                f'В базе заказов не найдено.\n\n'
-                f'Клиенты в базе:\n{clients_list}\n\n'
-                f'Проверь имя или выполни /zakaz {client_name}',
-                parse_mode='HTML'
+                f'⚠️ Notion временно недоступен.\n'
+                f'Для нового заказа сначала выполни /zakaz {client_name}'
             )
             return ConversationHandler.END
         
@@ -1196,7 +1391,10 @@ async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'client': client_name,
             'items': [],
             'type': 'ff',
-            'all_client_orders': client_orders
+            'all_client_orders': client_orders,
+            'ff_bundles': [],  # Список созданных наборов в FF
+            'ff_single_items': [],  # Товары, которые считаем по одиночке
+            'ff_items_in_bundles': set(),  # Индексы товаров, которые уже в наборах
         }
         
         if client_orders:
@@ -1226,7 +1424,6 @@ async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return F_SELECT_ORDER
         else:
-            # Новый клиент
             await update.message.reply_text(
                 f'Клиент: <b>{client_name}</b>\n'
                 f'В базе заказов не найдено.\n\n'
@@ -1236,24 +1433,30 @@ async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Без аргументов — работаем как раньше (нужен предыдущий /zakaz)
     if uid not in orders or not orders[uid].get('items'):
-        await update.message.reply_text(
-            'Сначала выполни /zakaz [имя клиента]\n\n'
-            'Или сразу: /ff [имя клиента]'
-        )
+        msg = 'Сначала выполни /zakaz [имя клиента]\n\nИли сразу: /ff [имя клиента]'
+        if hasattr(update, 'message') and update.message:
+            await update.message.reply_text(msg)
+        elif hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(msg)
         return ConversationHandler.END
     
-    result = await show_order_selection(update, context, uid, F_SELECT_ORDER)
+    result = await show_order_selection_ff(update, context, uid)
     if result is None:
         return ConversationHandler.END
-    if result == 'single':
-        await start_ff(update, context, uid)
-        return F_PACKAGES
-    return F_SELECT_ORDER
+    return result
 
-async def show_order_selection(update: Update, context: ContextTypes.DEFAULT_TYPE, uid, next_step):
+async def show_order_selection_ff(update: Update, context: ContextTypes.DEFAULT_TYPE, uid):
+    """Показывает выбор заказа для FF"""
     if uid not in orders:
-        await update.message.reply_text('Сначала выполни /zakaz [имя клиента]')
+        msg = 'Сначала выполни /zakaz [имя клиента]'
+        if hasattr(update, 'message') and update.message:
+            await update.message.reply_text(msg)
+        elif hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(msg)
         return None
+    
+    # Конвертируем наборы из /zakaz в формат /ff
+    convert_zakaz_bundles_to_ff(uid)
     
     client_orders = orders[uid].get('all_client_orders', [])
     client = orders[uid].get('client', 'Неизвестно')
@@ -1261,20 +1464,22 @@ async def show_order_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     if not client_orders:
         # Нет заказов в базе — работаем с текущим
         if orders[uid].get('items'):
-            return 'single'
-        await update.message.reply_text('Нет данных для расчёта. Сначала выполни /zakaz')
+            return await show_ff_main_menu(update, context, uid)
+        msg = 'Нет данных для расчёта. Сначала выполни /zakaz'
+        if hasattr(update, 'message') and update.message:
+            await update.message.reply_text(msg)
+        elif hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(msg)
         return None
     
     if len(client_orders) == 1:
-        await load_order_data(uid, 0)
-        return 'single'
+        await load_order_data_ff(uid, 0)
+        return await show_ff_main_menu(update, context, uid)
     
     keyboard = []
     for idx, order in enumerate(client_orders[:5]):
-        # Формируем понятное описание товаров
         items_list = order.get('items', [])
         if items_list:
-            # Показываем только названия (без количества, т.к. в Notion его нет)
             items_names = [i['name'][:12] for i in items_list[:3] if i.get('name')]
             items_desc = ", ".join(items_names)
             if len(items_list) > 3:
@@ -1287,14 +1492,24 @@ async def show_order_selection(update: Update, context: ContextTypes.DEFAULT_TYP
     
     keyboard.append([InlineKeyboardButton("➕ Новый заказ", callback_data='sel_order_new')])
     
-    await update.message.reply_text(
-        f'Клиент: <b>{client}</b>\n\nВыбери заказ:',
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
-    )
-    return next_step
+    msg_text = f'📦 FF Китай\nКлиент: <b>{client}</b>\n\nВыбери заказ:'
+    
+    if hasattr(update, 'message') and update.message:
+        await update.message.reply_text(
+            msg_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    elif hasattr(update, 'callback_query') and update.callback_query:
+        await update.callback_query.edit_message_text(
+            msg_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    return F_SELECT_ORDER
 
-async def load_order_data(uid, order_idx):
+async def load_order_data_ff(uid, order_idx):
+    """Загружает данные заказа для FF"""
     client_orders = orders[uid].get('all_client_orders', [])
     if 0 <= order_idx < len(client_orders):
         order = client_orders[order_idx]
@@ -1305,7 +1520,6 @@ async def load_order_data(uid, order_idx):
         if order.get('rub_rate'):
             orders[uid]['rub_rate'] = order['rub_rate']
         orders[uid]['selected_order_date'] = order.get('date', '')
-        # Сохраняем ID страницы Notion для обновления
         orders[uid]['notion_page_id'] = order.get('id')
         # Загружаем товары из заказа
         if order.get('items'):
@@ -1315,13 +1529,55 @@ async def load_order_data(uid, order_idx):
                 'price': 0,
                 'purchase': 0,
                 'delivery_factory': 0,
-                'dimensions': i.get('dimensions', ''),
-                'dims': i.get('dims', (0, 0, 0)),
+                'dimensions': '',
+                'dims': (0, 0, 0),
                 'boxes': 1,
                 'is_bundle': i.get('is_bundle', False)
             } for i in order['items'] if i.get('name')]
+        # Инициализируем FF-специфичные поля
+        orders[uid]['ff_bundles'] = []
+        orders[uid]['ff_single_items'] = []
+        orders[uid]['ff_items_in_bundles'] = set()
+
+async def convert_zakaz_bundles_to_ff(uid):
+    """Конвертирует наборы из /zakaz (bundle_name) в формат /ff (ff_bundles)"""
+    items = orders[uid].get('items', [])
+    if not items:
+        return
+    
+    # Группируем товары по bundle_name
+    bundles_map = {}
+    for idx, item in enumerate(items):
+        bundle_name = item.get('bundle_name')
+        if bundle_name:
+            if bundle_name not in bundles_map:
+                bundles_map[bundle_name] = []
+            bundles_map[bundle_name].append(idx)
+    
+    # Создаём ff_bundles из сгруппированных товаров
+    ff_bundles = []
+    items_in_bundles = set()
+    
+    for bundle_name, item_indices in bundles_map.items():
+        # Считаем общие размеры набора (пока просто сумма)
+        total_qty = sum(items[i]['qty'] for i in item_indices)
+        
+        ff_bundles.append({
+            'name': bundle_name,
+            'item_indices': item_indices,
+            'dims': (0, 0, 0),  # Будет запрошено в /ff
+            'packages': [],
+            'total_qty': total_qty,
+            'source': 'zakaz'  # Помечаем что из /zakaz
+        })
+        items_in_bundles.update(item_indices)
+    
+    orders[uid]['ff_bundles'] = ff_bundles
+    orders[uid]['ff_items_in_bundles'] = items_in_bundles
+    logger.info(f"Converted {len(ff_bundles)} bundles from /zakaz for uid={uid}")
 
 async def f_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора заказа в FF"""
     query = update.callback_query
     await query.answer()
     uid = str(update.effective_user.id)
@@ -1332,7 +1588,10 @@ async def f_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         order_idx = int(query.data.replace('sel_order_', ''))
-        await load_order_data(uid, order_idx)
+        await load_order_data_ff(uid, order_idx)
+        
+        # Конвертируем наборы из /zakaz в формат /ff
+        await convert_zakaz_bundles_to_ff(uid)
         
         order = orders[uid]['all_client_orders'][order_idx]
         items_list = order.get('items', [])
@@ -1343,322 +1602,653 @@ async def f_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             items_summary = order.get('items_text', 'Товар')[:40]
         
-        # Проверяем, есть ли товары с размерами
-        items_for_debug = orders[uid].get('items', [])
-        logger.info(f"DEBUG: items count = {len(items_for_debug)}")
-        for idx, it in enumerate(items_for_debug[:3]):
-            logger.info(f"DEBUG: item {idx}: name={it.get('name')}, dims={it.get('dims')}, has_dims={it.get('dims', (0,0,0))[0] > 0}")
-        
-        if not items_for_debug or not any(i.get('dims', (0,0,0))[0] > 0 for i in items_for_debug):
-            # Дебаг-информация для пользователя
-            debug_info = ""
-            if items_for_debug:
-                debug_info = "\n\nТовары в заказе:\n"
-                for it in items_for_debug[:5]:
-                    d = it.get('dims', (0,0,0))
-                    debug_info += f"• {it.get('name', '?')}: dims={d}\n"
-            else:
-                debug_info = "\n\nТовары: пустой список"
-            
-            await query.edit_message_text(
-                f'⚠️ Выбрано: {items_summary}\n\n'
-                f'В заказе нет размеров товаров.{debug_info}\n'
-                f'Нужно пересчитать через /zakaz {orders[uid]["client"]}'
-            )
-            return ConversationHandler.END
-        
         await query.edit_message_text(f'📦 FF: {items_summary}')
-        
-        # Показываем меню выбора режима
-        keyboard = [
-            [InlineKeyboardButton("📦 Считать по одиночке", callback_data='ff_mode_single')],
-            [InlineKeyboardButton("📦 Собрать набор", callback_data='ff_mode_bundle')],
-        ]
-        await query.message.reply_text(
-            f'📦 FF Китай — Выбор режима\n\n'
-            f'Товары: {items_summary}\n'
-            f'Создано наборов: 0',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return F_MAIN_MENU
+        return await show_ff_main_menu(update, context, uid)
     except Exception as e:
         logger.error(f"Ошибка в f_select_order_cb: {e}")
         await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
         return ConversationHandler.END
 
+async def show_ff_main_menu(update_or_query, context, uid):
+    """Главное меню FF — выбор режима работы с товарами"""
+    items = orders[uid].get('items', [])
+    
+    if not items:
+        msg = 'Нет товаров для расчёта FF'
+        if hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(msg)
+        elif hasattr(update_or_query, 'message') and update_or_query.message:
+            await update_or_query.message.reply_text(msg)
+        elif hasattr(update_or_query, 'effective_message') and update_or_query.effective_message:
+            await update_or_query.effective_message.reply_text(msg)
+        return ConversationHandler.END
+    
+    # Формируем список товаров с чекбоксами
+    items_in_bundles = orders[uid].get('ff_items_in_bundles', set())
+    bundles = orders[uid].get('ff_bundles', [])
+    
+    msg = "📦 <b>FF Китай — Выбор режима</b>\n\n"
+    msg += "<b>Товары:</b>\n"
+    
+    for idx, item in enumerate(items):
+        if idx in items_in_bundles:
+            # Находим в каком наборе этот товар
+            bundle_name = None
+            for b in bundles:
+                if idx in b.get('item_indices', []):
+                    bundle_name = b.get('name', 'Набор')
+                    break
+            msg += f"☑️ <s>{item['name']}</s> (в наборе \"{bundle_name}\")\n"
+        else:
+            msg += f"☐ {item['name']}\n"
+    
+    msg += f"\n<b>Создано наборов:</b> {len(bundles)}\n"
+    for b in bundles:
+        msg += f"  📦 {b.get('name', 'Без имени')}\n"
+    
+    # Кнопки режимов
+    keyboard = [
+        [InlineKeyboardButton("📦 Считать по одиночке", callback_data='ff_mode_single')],
+        [InlineKeyboardButton("📦 Собрать набор", callback_data='ff_mode_bundle')],
+        [InlineKeyboardButton("✅ Продолжить →", callback_data='ff_mode_continue')],
+    ]
+    
+    if hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.edit_message_text(
+            msg, 
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    elif hasattr(update_or_query, 'message') and update_or_query.message:
+        await update_or_query.message.reply_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    elif hasattr(update_or_query, 'effective_message') and update_or_query.effective_message:
+        await update_or_query.effective_message.reply_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    return F_MAIN_MENU
+
 async def ff_main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора режима FF"""
+    """Обработка выбора режима в главном меню FF"""
     query = update.callback_query
     await query.answer()
     uid = str(update.effective_user.id)
+    data = query.data
     
     try:
-        if query.data == 'ff_mode_single':
-            # Режим "по одиночке" — каждый товар отдельно
-            await query.edit_message_text('📦 Режим: по одиночке')
-            await start_ff(update, context, uid)
-            return F_PACKAGES
-            
-        elif query.data == 'ff_mode_bundle':
-            # Режим "собрать набор" — объединяем товары
-            await query.edit_message_text('📦 Режим: собрать набор')
-            # TODO: добавить логику создания набора
-            await start_ff(update, context, uid)
-            return F_PACKAGES
+        if data == 'ff_mode_single':
+            # Считать по одиночке — показываем товары, которые не в наборах
+            return await start_single_items(update, context, uid)
+        
+        elif data == 'ff_mode_bundle':
+            # Собрать набор — показываем чекбоксы для выбора товаров
+            return await start_bundle_creation(update, context, uid)
+        
+        elif data == 'ff_mode_continue':
+            # Продолжить — считаем итог
+            return await calculate_ff_summary(update, context, uid)
+        
+        elif data == 'ff_back_menu':
+            # Вернуться в меню
+            return await show_ff_main_menu(update, context, uid)
             
     except Exception as e:
         logger.error(f"Ошибка в ff_main_menu_cb: {e}")
         await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
         return ConversationHandler.END
 
-async def start_ff(update: Update, context: ContextTypes.DEFAULT_TYPE, uid):
-    # Для наборов — 1 коробка на набор (не умножаем на qty)
-    # Для обычных товаров — считаем как раньше
-    boxes = 0
-    for item in orders[uid]['items']:
-        if item.get('is_bundle'):
-            # Набор — считаем как 1 коробка на набор
-            boxes += 1
-        else:
-            # Обычный товар — используем сохраненное или считаем
-            boxes += item.get('boxes', 1)
+async def start_single_items(update_or_query, context, uid):
+    """Начинаем расчёт товаров по одиночке"""
+    items = orders[uid].get('items', [])
+    items_in_bundles = orders[uid].get('ff_items_in_bundles', set())
     
-    orders[uid]['ff_boxes_total'] = FF_BOX_PRICE * boxes
-    orders[uid]['ff_boxes_count'] = boxes
+    # Фильтруем товары, которые не в наборах
+    available_items = [(idx, item) for idx, item in enumerate(items) if idx not in items_in_bundles]
     
-    orders[uid]['ff_packages'] = {}
-    orders[uid]['ff_index'] = 0
-    
-    await show_ff_package(update, context, uid)
-
-async def show_ff_package(update_or_query, context, uid):
-    idx = orders[uid]['ff_index']
-    items = orders[uid]['items']
-    
-    # Получаем chat_id для отправки сообщений
-    chat_id = None
-    if hasattr(update_or_query, 'callback_query') and update_or_query.callback_query:
-        chat_id = update_or_query.callback_query.message.chat_id
-    elif hasattr(update_or_query, 'message') and update_or_query.message:
-        chat_id = update_or_query.message.chat_id
-    elif hasattr(update_or_query, 'chat_id'):
-        chat_id = update_or_query.chat_id
-    
-    if idx >= len(items):
-        boxes = orders[uid]['ff_boxes_count']
-        box_total = orders[uid]['ff_boxes_total']
-        msg = f"📦 FF Коробки: {FF_BOX_PRICE} ¥ × {boxes} = {fmt(box_total)} ¥ (авто)\n\nFF — Работа (¥ за 1 шт):"
-        if chat_id:
-            await context.bot.send_message(chat_id=chat_id, text=msg)
+    if not available_items:
+        msg = "⚠️ Нет товаров для расчёта по одиночке. Все товары уже в наборах."
+        if hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(msg)
         else:
             await update_or_query.message.reply_text(msg)
-        return F_WORK
+        return await show_ff_main_menu(update_or_query, context, uid)
     
-    item = items[idx]
+    # Инициализируем данные для одиночных товаров
+    orders[uid]['ff_single_items'] = []
+    orders[uid]['ff_single_index'] = 0
+    orders[uid]['ff_single_available'] = available_items
+    
+    return await show_single_item(update_or_query, context, uid)
+
+async def show_single_item(update_or_query, context, uid):
+    """Показываем текущий товар для выбора пакета"""
+    idx = orders[uid]['ff_single_index']
+    available = orders[uid]['ff_single_available']
+    
+    if idx >= len(available):
+        # Закончили с одиночными товарами, возвращаемся в меню
+        return await show_ff_main_menu(update_or_query, context, uid)
+    
+    item_idx, item = available[idx]
     l, w, h = item['dims']
     qty = item['qty']
-    is_bundle = item.get('is_bundle', False)
     
-    # Получаем все пакеты из Notion для ручного выбора
+    # Получаем пакеты из Notion
     packages = await get_packages_from_notion()
-    orders[uid]['ff_available_packages'] = packages  # Сохраняем для callback
+    orders[uid]['ff_available_packages'] = packages
     
-    bundle_label = "📦 НАБОР" if is_bundle else "📦 Товар"
-    qty_text = f"Кол-во наборов: {qty}" if is_bundle else f"Кол-во: {qty} шт"
+    msg = f"📦 Товар {idx+1}/{len(available)}: <b>{item['name']}</b>\n"
+    msg += f"📐 Размеры: {int(l)}×{int(w)}×{int(h)} см | Кол-во: {qty} шт\n\n"
+    msg += f"<b>Выбери пакет:</b>"
     
-    msg = f"{bundle_label} {idx+1}/{len(items)}: <b>{item['name']}</b>\n"
-    msg += f"📐 Размеры: {int(l)}×{int(w)}×{int(h)} см | {qty_text}\n\n"
-    
-    if is_bundle:
-        msg += f"<b>Для НАБОРА:</b> 1 пакет на весь набор\n"
-        msg += f"Выбери пакет из базы:\n\n"
-    else:
-        msg += f"<b>Выбери пакет из базы:</b>"
-    
-    # Создаём кнопки для всех пакетов
     keyboard = []
     for pkg_idx, pkg in enumerate(packages):
         btn_text = f"📦 {pkg['name']} — {pkg['price']}¥ ({int(pkg['l'])}×{int(pkg['w'])}×{int(pkg['h'])}см)"
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f'f_pkg_select_{pkg_idx}')])
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f'ff_single_pkg_{pkg_idx}')])
     
-    # Кнопка для своей цены
-    keyboard.append([InlineKeyboardButton("💰 Своя цена", callback_data='f_pkg_custom')])
+    keyboard.append([InlineKeyboardButton("💰 Своя цена", callback_data='ff_single_custom')])
+    keyboard.append([InlineKeyboardButton("← Назад в меню", callback_data='ff_back_menu')])
     
     if hasattr(update_or_query, 'edit_message_text'):
         await update_or_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
     else:
         await update_or_query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+    return F_SINGLE_ITEMS
 
-async def f_package_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ff_single_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора пакета для одиночного товара"""
     query = update.callback_query
     await query.answer()
     uid = str(update.effective_user.id)
     data = query.data
     
-    if data.startswith('f_pkg_select_'):
-        # Пользователь выбрал конкретный пакет из списка
-        pkg_idx = int(data.replace('f_pkg_select_', ''))
-        packages = orders[uid].get('ff_available_packages', [])
-        
-        if pkg_idx < len(packages):
-            selected_pkg = packages[pkg_idx]
-            idx = orders[uid]['ff_index']
-            items = orders[uid]['items']
-            item = items[idx]
-            qty = item['qty']
-            is_bundle = item.get('is_bundle', False)
+    try:
+        if data.startswith('ff_single_pkg_'):
+            pkg_idx = int(data.replace('ff_single_pkg_', ''))
+            packages = orders[uid].get('ff_available_packages', [])
             
-            # Для набора — 1 пакет на весь набор
-            # Для обычного товара — пакет на каждую штуку
-            if is_bundle:
-                pkg_total = selected_pkg['price']  # 1 пакет на набор
-                qty_display = 1
-            else:
+            if pkg_idx < len(packages):
+                selected_pkg = packages[pkg_idx]
+                idx = orders[uid]['ff_single_index']
+                available = orders[uid]['ff_single_available']
+                item_idx, item = available[idx]
+                qty = item['qty']
+                
                 pkg_total = selected_pkg['price'] * qty
-                qty_display = qty
-            
-            orders[uid]['ff_packages'][idx] = {
-                'pkg': selected_pkg, 
-                'total': pkg_total, 
-                'qty': qty_display,
-                'is_bundle': is_bundle
-            }
-            
-            # Подтверждаем выбор
-            if is_bundle:
+                
+                # Сохраняем данные
+                orders[uid]['ff_single_items'].append({
+                    'item_idx': item_idx,
+                    'item': item,
+                    'pkg': selected_pkg,
+                    'total': pkg_total,
+                    'qty': qty
+                })
+                
                 await query.edit_message_text(
-                    f"✅ Выбран для НАБОРА: <b>{selected_pkg['name']}</b>\n"
-                    f"   1 пакет × {selected_pkg['price']}¥ = {fmt(pkg_total)}¥\n"
-                    f"   (на {qty} наборов)"
+                    f"✅ <b>{item['name']}</b>\n"
+                    f"   {selected_pkg['name']} × {qty} = {fmt(pkg_total)}¥"
                 )
-            else:
-                await query.edit_message_text(
-                    f"✅ Выбран: <b>{selected_pkg['name']}</b>\n"
-                    f"   {selected_pkg['price']}¥ × {qty} = {fmt(pkg_total)}¥"
-                )
+                
+                orders[uid]['ff_single_index'] += 1
+                return await show_single_item(update, context, uid)
+        
+        elif data == 'ff_single_custom':
+            await query.edit_message_text('Введи цену пакетов (¥):')
+            return F_SINGLE_ITEMS
             
-            orders[uid]['ff_index'] += 1
-            result = await show_ff_package(update, context, uid)
-            if result == F_WORK:
-                return F_WORK
-            return F_PACKAGES
-        else:
-            await query.edit_message_text('❌ Ошибка: пакет не найден')
-            return F_PACKAGES
-    elif data == 'f_pkg_custom':
-        await query.edit_message_text('Введи цену пакетов (¥):')
-        return F_PACKAGE_PRICE
+    except Exception as e:
+        logger.error(f"Ошибка в ff_single_cb: {e}")
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
 
-async def f_package_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ff_single_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ручной ввод цены пакета для одиночного товара"""
     uid = str(update.effective_user.id)
     try:
         price = float(update.message.text)
-        idx = orders[uid]['ff_index']
-        items = orders[uid]['items']
-        item = items[idx]
+        idx = orders[uid]['ff_single_index']
+        available = orders[uid]['ff_single_available']
+        item_idx, item = available[idx]
         qty = item['qty']
-        is_bundle = item.get('is_bundle', False)
         
-        # Для набора — 1 пакет на весь набор
-        if is_bundle:
-            total_price = price
-            qty_display = 1
-        else:
-            total_price = price * qty
-            qty_display = qty
+        total_price = price * qty
         
-        orders[uid]['ff_packages'][idx] = {
+        orders[uid]['ff_single_items'].append({
+            'item_idx': item_idx,
+            'item': item,
             'pkg': {'name': 'Пакет (ручной)'},
             'total': total_price,
-            'qty': qty_display,
-            'is_bundle': is_bundle
-        }
-        orders[uid]['ff_index'] += 1
+            'qty': qty
+        })
         
-        if orders[uid]['ff_index'] >= len(items):
-            boxes = orders[uid]['ff_boxes_count']
-            box_total = orders[uid]['ff_boxes_total']
-            await update.message.reply_text(
-                f'📦 FF Коробки: {FF_BOX_PRICE} ¥ × {boxes} = {fmt(box_total)} ¥ (авто)\n\n'
-                f'FF — Работа (¥ за 1 шт):'
-            )
-            return F_WORK
-        else:
-            await show_ff_package(update, context, uid)
-            return F_PACKAGES
+        orders[uid]['ff_single_index'] += 1
+        return await show_single_item(update, context, uid)
     except:
         await update.message.reply_text('Число! Введи цену:')
-        return F_PACKAGE_PRICE
+        return F_SINGLE_ITEMS
 
-async def f_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_bundle_creation(update_or_query, context, uid):
+    """Начинаем создание набора — выбор товаров"""
+    items = orders[uid].get('items', [])
+    items_in_bundles = orders[uid].get('ff_items_in_bundles', set())
+    
+    # Фильтруем доступные товары
+    available_items = [(idx, item) for idx, item in enumerate(items) if idx not in items_in_bundles]
+    
+    if not available_items:
+        msg = "⚠️ Нет товаров для создания набора."
+        if hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(msg)
+        else:
+            await update_or_query.message.reply_text(msg)
+        return await show_ff_main_menu(update_or_query, context, uid)
+    
+    # Инициализируем выбор
+    orders[uid]['ff_bundle_selected'] = set()
+    orders[uid]['ff_bundle_available'] = available_items
+    
+    return await show_bundle_item_selection(update_or_query, context, uid)
+
+async def show_bundle_item_selection(update_or_query, context, uid):
+    """Показываем чекбоксы для выбора товаров в набор"""
+    available = orders[uid]['ff_bundle_available']
+    selected = orders[uid]['ff_bundle_selected']
+    
+    msg = "📦 <b>Собрать набор</b>\n\n"
+    msg += "Выбери товары для набора (нажми для выбора):\n\n"
+    
+    keyboard = []
+    for idx, (item_idx, item) in enumerate(available):
+        name = item['name'][:30]
+        qty = item.get('qty', 0)
+        mark = "☑️" if item_idx in selected else "☐"
+        keyboard.append([InlineKeyboardButton(
+            f"{mark} {name} × {qty}",
+            callback_data=f'ff_bundle_sel_{item_idx}'
+        )])
+    
+    keyboard.append([InlineKeyboardButton("✅ Далее →", callback_data='ff_bundle_next')])
+    keyboard.append([InlineKeyboardButton("← Назад", callback_data='ff_back_menu')])
+    
+    selected_names = [items['name'] for i, items in available if i in selected]
+    selected_text = "\n".join([f"• {n}" for n in selected_names]) if selected_names else "(ничего не выбрано)"
+    
+    msg += f"<b>Выбрано ({len(selected)} шт):</b>\n{selected_text}"
+    
+    if hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+    else:
+        await update_or_query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+    return F_BUNDLE_CREATE
+
+async def ff_bundle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора товаров для набора"""
+    query = update.callback_query
+    await query.answer()
+    uid = str(update.effective_user.id)
+    data = query.data
+    
+    try:
+        if data.startswith('ff_bundle_sel_'):
+            item_idx = int(data.replace('ff_bundle_sel_', ''))
+            selected = orders[uid]['ff_bundle_selected']
+            
+            if item_idx in selected:
+                selected.remove(item_idx)
+            else:
+                selected.add(item_idx)
+            
+            return await show_bundle_item_selection(update, context, uid)
+        
+        elif data == 'ff_bundle_next':
+            selected = orders[uid]['ff_bundle_selected']
+            
+            if not selected:
+                await query.answer("Выбери хотя бы один товар!", show_alert=True)
+                return F_BUNDLE_CREATE
+            
+            # Переходим к вводу имени набора
+            await query.edit_message_text(
+                "➕ <b>Новый набор</b>\n\n"
+                "Введи имя набора:\n"
+                'Например: "Сет розовый", "Комбо A"',
+                parse_mode='HTML'
+            )
+            return F_BUNDLE_NAME
+        
+        elif data == 'ff_back_menu':
+            return await show_ff_main_menu(update, context, uid)
+            
+    except Exception as e:
+        logger.error(f"Ошибка в ff_bundle_cb: {e}")
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
+
+async def ff_bundle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ввод имени набора"""
+    uid = str(update.effective_user.id)
+    try:
+        bundle_name = update.message.text.strip()
+        if not bundle_name:
+            await update.message.reply_text('Имя не может быть пустым. Введи имя набора:')
+            return F_BUNDLE_NAME
+        
+        orders[uid]['ff_bundle_name'] = bundle_name
+        await update.message.reply_text(
+            f'📦 <b>{bundle_name}</b>\n\n'
+            f'Введи размеры упаковки для набора (Д Ш В в см):\n'
+            f'Например: 20 15 10',
+            parse_mode='HTML'
+        )
+        return F_BUNDLE_DIMS
+    except Exception as e:
+        logger.error(f"Ошибка в ff_bundle_name: {e}")
+        await update.message.reply_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
+
+async def ff_bundle_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ввод размеров набора"""
+    uid = str(update.effective_user.id)
+    text = update.message.text.strip()
+    try:
+        dims = [float(x) for x in text.split()]
+        if len(dims) != 3:
+            raise ValueError
+        l, w, h = dims
+        
+        orders[uid]['ff_bundle_dims'] = (l, w, h)
+        
+        # Показываем пакеты из базы
+        packages = await get_packages_from_notion()
+        orders[uid]['ff_bundle_packages'] = packages
+        
+        msg = f"📦 <b>{orders[uid]['ff_bundle_name']}</b>\n"
+        msg += f"📐 Размеры: {int(l)}×{int(w)}×{int(h)} см\n\n"
+        msg += f"<b>Выбери пакет для набора:</b>"
+        
+        keyboard = []
+        for pkg_idx, pkg in enumerate(packages):
+            btn_text = f"📦 {pkg['name']} — {pkg['price']}¥ ({int(pkg['l'])}×{int(pkg['w'])}×{int(pkg['h'])}см)"
+            keyboard.append([InlineKeyboardButton(btn_text, callback_data=f'ff_bundle_pkg_{pkg_idx}')])
+        
+        keyboard.append([InlineKeyboardButton("💰 Своя цена", callback_data='ff_bundle_pkg_custom')])
+        
+        await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+        return F_BUNDLE_PACKAGE
+    except:
+        await update.message.reply_text('Неверный формат. Введи 3 числа:\n20 15 10')
+        return F_BUNDLE_DIMS
+
+async def ff_bundle_package_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выбор пакета для набора"""
+    query = update.callback_query
+    await query.answer()
+    uid = str(update.effective_user.id)
+    data = query.data
+    
+    try:
+        if data.startswith('ff_bundle_pkg_'):
+            pkg_idx = int(data.replace('ff_bundle_pkg_', ''))
+            packages = orders[uid].get('ff_bundle_packages', [])
+            
+            if pkg_idx < len(packages):
+                selected_pkg = packages[pkg_idx]
+                orders[uid]['ff_bundle_pkg'] = selected_pkg
+                orders[uid]['ff_bundle_pkg_price'] = selected_pkg['price']
+                
+                await query.edit_message_text(
+                    f"📦 <b>{orders[uid]['ff_bundle_name']}</b>\n"
+                    f"✅ Пакет: {selected_pkg['name']} — {selected_pkg['price']}¥\n\n"
+                    f"Введи количество термобумаги для набора (листов):\n"
+                    f"Или отправь \"auto\" для авто-расчёта"
+                )
+                return F_BUNDLE_THERMAL
+        
+        elif data == 'ff_bundle_pkg_custom':
+            await query.edit_message_text('Введи цену пакета (¥):')
+            return F_BUNDLE_PACKAGE
+            
+    except Exception as e:
+        logger.error(f"Ошибка в ff_bundle_package_cb: {e}")
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
+
+async def ff_bundle_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ручной ввод цены пакета для набора"""
     uid = str(update.effective_user.id)
     try:
         price = float(update.message.text)
-        total_qty = sum(i['qty'] for i in orders[uid]['items'])
-        orders[uid]['ff_work'] = price * total_qty
+        orders[uid]['ff_bundle_pkg'] = {'name': 'Пакет (ручной)'}
+        orders[uid]['ff_bundle_pkg_price'] = price
         
-        # Считаем сколько товаров и пакетов
-        items_count = len(orders[uid]['items'])
-        bundles_count = sum(1 for i in orders[uid]['items'] if i.get('is_bundle'))
-        regular_count = items_count - bundles_count
-        
-        msg = "📝 FF — Термобумага (0.016¥)\n\n"
-        msg += f"У тебя:\n"
-        if regular_count > 0:
-            msg += f"• {regular_count} обычных товаров\n"
-        if bundles_count > 0:
-            msg += f"• {bundles_count} наборов\n"
-        msg += f"\nВведи общее количество листов термобумаги:\n"
-        msg += f"(на товары + на пакеты)"
-        
-        await update.message.reply_text(msg)
-        return F_THERMAL
+        await update.message.reply_text(
+            f"📦 <b>{orders[uid]['ff_bundle_name']}</b>\n"
+            f"✅ Пакет: {price}¥\n\n"
+            f"Введи количество термобумаги для набора (листов):\n"
+            f"Или отправь \"auto\" для авто-расчёта"
+        )
+        return F_BUNDLE_THERMAL
     except:
-        await update.message.reply_text('Число!')
-        return F_WORK
+        await update.message.reply_text('Число! Введи цену:')
+        return F_BUNDLE_PACKAGE
 
-async def f_thermal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def ff_bundle_thermal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ввод термобумаги для набора"""
+    uid = str(update.effective_user.id)
+    text = update.message.text.strip().lower()
+    
+    try:
+        if text == 'auto':
+            # Авто-расчёт: 1 лист на набор
+            thermal_sheets = 1
+        else:
+            thermal_sheets = float(text)
+        
+        orders[uid]['ff_bundle_thermal'] = 0.016 * thermal_sheets
+        orders[uid]['ff_bundle_thermal_sheets'] = thermal_sheets
+        
+        await update.message.reply_text(
+            f"📦 <b>{orders[uid]['ff_bundle_name']}</b>\n"
+            f"📝 Термобумага: {int(thermal_sheets)} листов = {fmt(orders[uid]['ff_bundle_thermal'])}¥\n\n"
+            f"Введи цену сборки набора (¥):"
+        )
+        return F_BUNDLE_WORK
+    except:
+        await update.message.reply_text('Число или "auto"! Введи количество:')
+        return F_BUNDLE_THERMAL
+
+async def ff_bundle_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ввод цены сборки набора и сохранение набора"""
     uid = str(update.effective_user.id)
     try:
-        total_sheets = float(update.message.text)
-        # Общее количество листов умножаем на цену
-        orders[uid]['ff_thermal'] = 0.016 * total_sheets
+        work_price = float(update.message.text)
         
-        packages_total = sum(p['total'] for p in orders[uid].get('ff_packages', {}).values())
-        boxes = orders[uid].get('ff_boxes_total', 0)
-        work = orders[uid]['ff_work']
-        thermal = orders[uid]['ff_thermal']
+        # Собираем данные набора
+        bundle_name = orders[uid]['ff_bundle_name']
+        dims = orders[uid]['ff_bundle_dims']
+        pkg = orders[uid]['ff_bundle_pkg']
+        pkg_price = orders[uid]['ff_bundle_pkg_price']
+        thermal = orders[uid]['ff_bundle_thermal']
+        selected_indices = orders[uid]['ff_bundle_selected']
         
-        ff_total = packages_total + boxes + work + thermal
+        # Считаем итог по набору
+        box_price = FF_BOX_PRICE  # 2¥ за коробку
+        bundle_total = pkg_price + box_price + thermal + work_price
+        
+        # Сохраняем набор
+        bundle = {
+            'name': bundle_name,
+            'dims': dims,
+            'pkg': pkg,
+            'pkg_price': pkg_price,
+            'box_price': box_price,
+            'thermal': thermal,
+            'work_price': work_price,
+            'total': bundle_total,
+            'item_indices': list(selected_indices)
+        }
+        
+        orders[uid]['ff_bundles'].append(bundle)
+        
+        # Помечаем товары как входящие в набор
+        items_in_bundles = orders[uid].get('ff_items_in_bundles', set())
+        items_in_bundles.update(selected_indices)
+        orders[uid]['ff_items_in_bundles'] = items_in_bundles
+        
+        # Показываем подтверждение
+        l, w, h = dims
+        msg = f"✅ <b>Набор создан!</b>\n\n"
+        msg += f"📦 {bundle_name}\n"
+        msg += f"📐 Размеры: {int(l)}×{int(w)}×{int(h)} см\n"
+        msg += f"📦 Пакет: {pkg['name']} — {pkg_price}¥\n"
+        msg += f"📦 Коробка: {box_price}¥\n"
+        msg += f"📝 Термобумага: {fmt(thermal)}¥\n"
+        msg += f"🔧 Сборка: {work_price}¥\n"
+        msg += f"━━━━━━━━━━━━\n"
+        msg += f"<b>Итого по набору: {fmt(bundle_total)}¥</b>\n\n"
+        msg += f"Товары в наборе: {len(selected_indices)} шт"
+        
+        await update.message.reply_text(msg, parse_mode='HTML')
+        
+        # Возвращаемся в главное меню
+        return await show_ff_main_menu(update, context, uid)
+        
+    except:
+        await update.message.reply_text('Число! Введи цену сборки:')
+        return F_BUNDLE_WORK
+
+async def calculate_ff_summary(update_or_query, context, uid):
+    """Расчёт итоговой суммы FF"""
+    items = orders[uid].get('items', [])
+    bundles = orders[uid].get('ff_bundles', [])
+    single_items = orders[uid].get('ff_single_items', [])
+    
+    if not bundles and not single_items:
+        msg = "⚠️ Ничего не выбрано для расчёта.\n\nСначала выбери режим и укажи товары."
+        if hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(msg)
+        else:
+            await update_or_query.message.reply_text(msg)
+        return await show_ff_main_menu(update_or_query, context, uid)
+    
+    # Считаем коробки для одиночных товаров
+    single_boxes = 0
+    for single in single_items:
+        item = single['item']
+        single_boxes += item.get('boxes', 1)
+    
+    # Коробки для наборов — 1 на набор
+    bundle_boxes = len(bundles)
+    
+    total_boxes = single_boxes + bundle_boxes
+    boxes_total = FF_BOX_PRICE * total_boxes
+    
+    # Сумма пакетов
+    single_packages_total = sum(s['total'] for s in single_items)
+    bundle_packages_total = sum(b['pkg_price'] for b in bundles)
+    packages_total = single_packages_total + bundle_packages_total
+    
+    # Термобумага
+    bundle_thermal_total = sum(b['thermal'] for b in bundles)
+    
+    # Работа (сборка наборов)
+    bundle_work_total = sum(b['work_price'] for b in bundles)
+    
+    # Общая сумма FF (без работы и термобумаги одиночных — их спросим)
+    ff_total = packages_total + boxes_total + bundle_thermal_total + bundle_work_total
+    
+    # Сохраняем промежуточные данные
+    orders[uid]['ff_packages_total'] = packages_total
+    orders[uid]['ff_boxes_total'] = boxes_total
+    orders[uid]['ff_bundle_thermal_total'] = bundle_thermal_total
+    orders[uid]['ff_bundle_work_total'] = bundle_work_total
+    orders[uid]['ff_single_items'] = single_items
+    
+    # Спрашиваем работу для одиночных товаров
+    msg = f"📦 <b>FF Китай — Предварительный расчёт</b>\n\n"
+    
+    if bundles:
+        msg += f"<b>Наборы ({len(bundles)} шт):</b>\n"
+        for b in bundles:
+            msg += f"  📦 {b['name']}: {fmt(b['total'])}¥\n"
+        msg += "\n"
+    
+    if single_items:
+        msg += f"<b>Товары по одиночке ({len(single_items)} шт):</b>\n"
+        for s in single_items:
+            msg += f"  📦 {s['item']['name']}: {fmt(s['total'])}¥\n"
+        msg += "\n"
+    
+    msg += f"📦 Коробки: {fmt(boxes_total)}¥ ({total_boxes} шт)\n"
+    msg += f"━━━━━━━━━━━━\n"
+    msg += f"Промежуточный итог: {fmt(ff_total)}¥\n\n"
+    msg += f"FF — Работа для одиночных товаров (¥):"
+    
+    if hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.edit_message_text(msg, parse_mode='HTML')
+    else:
+        await update_or_query.message.reply_text(msg, parse_mode='HTML')
+    
+    return F_SUMMARY
+
+async def ff_summary_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ввод работы для одиночных товаров и итоговый расчёт"""
+    uid = str(update.effective_user.id)
+    try:
+        single_work = float(update.message.text)
+        orders[uid]['ff_single_work'] = single_work
+        
+        # Собираем все данные
+        bundles = orders[uid].get('ff_bundles', [])
+        single_items = orders[uid].get('ff_single_items', [])
+        packages_total = orders[uid]['ff_packages_total']
+        boxes_total = orders[uid]['ff_boxes_total']
+        bundle_thermal_total = orders[uid]['ff_bundle_thermal_total']
+        bundle_work_total = orders[uid]['ff_bundle_work_total']
+        
+        # Общая сумма
+        ff_total = packages_total + boxes_total + bundle_thermal_total + bundle_work_total + single_work
         orders[uid]['ff_total_yuan'] = ff_total
         
         real_rate = orders[uid].get('real_rate', 55)
         ff_amd = int(ff_total * real_rate)
         
-        # Показываем детализацию по наборам
-        msg = f"📦 <b>FF Китай</b>\n\n"
+        # Формируем итоговое сообщение
+        msg = f"📦 <b>FF Китай — ИТОГО</b>\n\n"
         
-        for idx, pkg_data in orders[uid].get('ff_packages', {}).items():
-            item = orders[uid]['items'][idx]
-            if item.get('is_bundle'):
-                msg += f"📦 <b>{item['name']}</b> (НАБОР)\n"
-                msg += f"   1 пакет × {pkg_data['pkg']['price']}¥ = {fmt(pkg_data['total'])}¥\n"
-            else:
-                msg += f"📦 {item['name']}\n"
-                msg += f"   {pkg_data['qty']} пакетов × {pkg_data['pkg']['price']}¥ = {fmt(pkg_data['total'])}¥\n"
+        if bundles:
+            msg += f"<b>Наборы ({len(bundles)} шт):</b>\n"
+            for b in bundles:
+                l, w, h = b['dims']
+                msg += f"\n📦 <b>{b['name']}</b>\n"
+                msg += f"   📐 {int(l)}×{int(w)}×{int(h)} см\n"
+                msg += f"   📦 Пакет: {b['pkg']['name']} — {b['pkg_price']}¥\n"
+                msg += f"   📝 Термобумага: {fmt(b['thermal'])}¥\n"
+                msg += f"   🔧 Сборка: {b['work_price']}¥\n"
+                msg += f"   <b>Итого: {fmt(b['total'])}¥</b>\n"
+            msg += "\n"
         
-        msg += f"\nКоробки: {fmt(boxes)}¥\n"
-        msg += f"Работа: {fmt(work)}¥\n"
-        msg += f"Термобумага ({int(total_sheets)} листов): {fmt(thermal)}¥\n"
+        if single_items:
+            msg += f"<b>Товары по одиночке ({len(single_items)} шт):</b>\n"
+            for s in single_items:
+                msg += f"  📦 {s['item']['name']}: {s['pkg']['name']} × {s['qty']} = {fmt(s['total'])}¥\n"
+            msg += f"  🔧 Работа: {single_work}¥\n\n"
+        
+        msg += f"📦 Коробки: {fmt(boxes_total)}¥\n"
         msg += f"━━━━━━━━━━━━\n"
-        msg += f"<b>Итого FF: {fmt(ff_total)}¥ = {ff_amd} AMD</b>\n\n"
+        msg += f"<b>Итого FF: {fmt(ff_total)}¥ = {ff_amd} AMD</b>\n"
+        msg += f"━━━━━━━━━━━━\n\n"
         msg += f"Для доставки РФ используй <b>/dostavka</b>"
         
         await update.message.reply_text(msg, parse_mode='HTML')
         
-        await update.message.reply_text(msg, parse_mode='HTML')
-        
-        # === АВТО-СОХРАНЕНИЕ В NOTION ===
+        # Сохраняем в Notion
         has_access, _ = await check_notion_access()
         if has_access:
             try:
@@ -1670,9 +2260,10 @@ async def f_thermal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         save_session()
         return ConversationHandler.END
+        
     except:
-        await update.message.reply_text('Число!')
-        return F_THERMAL
+        await update.message.reply_text('Число! Введи цену работы:')
+        return F_SUMMARY
 
 # ======== /DOSTAVKA ========
 
@@ -1739,32 +2330,90 @@ async def cmd_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Без аргументов — работаем как раньше
     if uid not in orders or not orders[uid].get('items'):
-        await update.message.reply_text(
-            'Сначала выполни /zakaz [имя клиента]\n\n'
-            'Или сразу: /dostavka [имя клиента]'
-        )
+        msg = 'Сначала выполни /zakaz [имя клиента]\n\nИли сразу: /dostavka [имя клиента]'
+        if hasattr(update, 'message') and update.message:
+            await update.message.reply_text(msg)
+        elif hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(msg)
         return ConversationHandler.END
     
-    result = await show_order_selection(update, context, uid, D_SELECT_ORDER)
+    result = await show_order_selection_dostavka(update, context, uid)
     if result is None:
         return ConversationHandler.END
-    if result == 'single':
+    return result
+
+async def show_order_selection_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE, uid):
+    """Показывает выбор заказа для доставки"""
+    client_orders = orders[uid].get('all_client_orders', [])
+    client = orders[uid].get('client', 'Неизвестно')
+    
+    if not client_orders:
+        # Нет заказов в базе — работаем с текущим
         await start_dostavka(update, context, uid)
         return D_WAREHOUSE
-    return D_SELECT_ORDER
-
-async def start_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE, uid):
-    orders[uid]['warehouses'] = []
+    
+    if len(client_orders) == 1:
+        await load_order_data_dostavka(uid, 0)
+        await start_dostavka(update, context, uid)
+        return D_WAREHOUSE
     
     keyboard = []
-    cities = [c for c in TARIFFS.keys() if '(' not in c]
-    for i in range(0, len(cities), 2):
-        row = [InlineKeyboardButton(cities[i], callback_data=f'd_wh_{cities[i]}')]
-        if i + 1 < len(cities):
-            row.append(InlineKeyboardButton(cities[i+1], callback_data=f'd_wh_{cities[i+1]}'))
-        keyboard.append(row)
+    for idx, order in enumerate(client_orders[:5]):
+        items_list = order.get('items', [])
+        if items_list:
+            items_names = [i['name'][:12] for i in items_list[:3] if i.get('name')]
+            items_desc = ", ".join(items_names)
+            if len(items_list) > 3:
+                items_desc += f" +{len(items_list)-3}"
+        else:
+            items_desc = order.get('items_text', 'Товар')[:25]
+        
+        btn_text = f"📦 {items_desc}"
+        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f'sel_order_{idx}')])
     
-    await update.message.reply_text('Выбери склад РФ:', reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard.append([InlineKeyboardButton("➕ Новый заказ", callback_data='sel_order_new')])
+    
+    msg_text = f'🚚 FILLX Доставка РФ\nКлиент: <b>{client}</b>\n\nВыбери заказ:'
+    
+    if hasattr(update, 'message') and update.message:
+        await update.message.reply_text(
+            msg_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    elif hasattr(update, 'callback_query') and update.callback_query:
+        await update.callback_query.edit_message_text(
+            msg_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+    return D_SELECT_ORDER
+
+async def load_order_data_dostavka(uid, order_idx):
+    """Загружает данные заказа для доставки"""
+    client_orders = orders[uid].get('all_client_orders', [])
+    if 0 <= order_idx < len(client_orders):
+        order = client_orders[order_idx]
+        if order.get('client_rate'):
+            orders[uid]['client_rate'] = order['client_rate']
+        if order.get('real_rate'):
+            orders[uid]['real_rate'] = order['real_rate']
+        if order.get('rub_rate'):
+            orders[uid]['rub_rate'] = order['rub_rate']
+        orders[uid]['selected_order_date'] = order.get('date', '')
+        orders[uid]['notion_page_id'] = order.get('id')
+        if order.get('items'):
+            orders[uid]['items'] = [{
+                'name': i['name'],
+                'qty': i.get('qty', 0),
+                'price': 0,
+                'purchase': 0,
+                'delivery_factory': 0,
+                'dimensions': '',
+                'dims': (0, 0, 0),
+                'boxes': 1,
+                'is_bundle': i.get('is_bundle', False)
+            } for i in order['items'] if i.get('name')]
 
 async def d_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1777,7 +2426,7 @@ async def d_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         order_idx = int(query.data.replace('sel_order_', ''))
-        await load_order_data(uid, order_idx)
+        await load_order_data_dostavka(uid, order_idx)
         
         order = orders[uid]['all_client_orders'][order_idx]
         items_list = order.get('items', [])
@@ -1788,13 +2437,36 @@ async def d_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             items_summary = order.get('items_text', 'Товар')[:40]
         
-        await query.edit_message_text(f'Выбрано: {items_summary}')
+        await query.edit_message_text(f'🚚 FILLX: {items_summary}')
         await start_dostavka(update, context, uid)
         return D_WAREHOUSE
     except Exception as e:
         logger.error(f"Ошибка в d_select_order_cb: {e}")
         await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
         return ConversationHandler.END
+
+async def start_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE, uid):
+    orders[uid]['warehouses'] = []
+    
+    keyboard = []
+    cities = [c for c in TARIFFS.keys() if '(' not in c]
+    for i in range(0, len(cities), 2):
+        row = [InlineKeyboardButton(cities[i], callback_data=f'd_wh_{cities[i]}')]
+        if i + 1 < len(cities):
+            row.append(InlineKeyboardButton(cities[i+1], callback_data=f'd_wh_{cities[i+1]}'))
+        keyboard.append(row)
+    
+    # Поддержка как message, так и callback_query
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            'Выбери склад РФ:', 
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await update.message.reply_text(
+            'Выбери склад РФ:', 
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 async def d_warehouse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2047,6 +2719,359 @@ async def save_to_notion(update, context, uid):
         logger.error(traceback.format_exc())
         return None
 
+# ======== /PASTE - Быстрый расчёт из текста ========
+
+async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Быстрый расчёт заказа из вставленного текста.
+    Формат с полными данными:
+    
+    Клиент: Имя
+    
+    Товар 1:
+    Название: Крепление
+    Количество: 400
+    Цена клиенту: 6.2
+    Закупка: 4.5
+    Доставка: 43.6
+    Размеры: 16 12 5
+    
+    Курс клиенту: 58
+    Мой курс: 55
+    Комиссия: 3%
+    Минимальная комиссия: 10000
+    """
+    uid = str(update.effective_user.id)
+    
+    # Получаем текст после команды
+    text = update.message.text.replace('/paste', '').strip()
+    
+    if not text:
+        await update.message.reply_text(
+            '📋 Вставь расчёт в формате:\n\n'
+            '<code>Клиент: Имя</code>\n'
+            '<code>Товар 1:</code>\n'
+            '<code>Название: Крепление</code>\n'
+            '<code>Количество: 400</code>\n'
+            '<code>Цена клиенту: 6.2</code>\n'
+            '<code>Закупка: 4.5</code>\n'
+            '<code>Доставка: 43.6</code>\n'
+            '<code>Размеры: 16 12 5</code>\n\n'
+            '<code>Курс клиенту: 58</code>\n'
+            '<code>Мой курс: 55</code>\n'
+            '<code>Комиссия: 3%</code>\n'
+            '<code>Минимальная комиссия: 10000</code>',
+            parse_mode='HTML'
+        )
+        return
+    
+    # Парсим текст
+    lines = text.strip().split('\n')
+    
+    # Данные заказа
+    client = 'Unknown'
+    items = []
+    client_rate = 58
+    real_rate = 55
+    commission_pct = 3
+    min_commission = 10000
+    
+    # Текущий товар
+    current_item = None
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+        
+        if not line:
+            continue
+        
+        # Клиент
+        if line.lower().startswith('клиент:'):
+            client = line.split(':', 1)[1].strip()
+        
+        # Новый товар
+        elif re.match(r'товар\s*\d+:', line, re.IGNORECASE):
+            if current_item and current_item.get('name'):
+                items.append(current_item)
+            current_item = {'dims': (0, 0, 0)}
+        
+        # Поля товара
+        elif line.lower().startswith('название:'):
+            if current_item is None:
+                current_item = {'dims': (0, 0, 0)}
+            current_item['name'] = line.split(':', 1)[1].strip()
+        
+        elif line.lower().startswith('количество:'):
+            if current_item:
+                try:
+                    current_item['qty'] = int(line.split(':', 1)[1].strip())
+                except:
+                    current_item['qty'] = 0
+        
+        elif line.lower().startswith('цена клиенту:'):
+            if current_item:
+                try:
+                    current_item['price'] = float(line.split(':', 1)[1].strip().replace('¥', ''))
+                except:
+                    current_item['price'] = 0
+        
+        elif line.lower().startswith('закупка:'):
+            if current_item:
+                try:
+                    current_item['purchase'] = float(line.split(':', 1)[1].strip().replace('¥', ''))
+                except:
+                    current_item['purchase'] = 0
+        
+        elif line.lower().startswith('доставка:'):
+            if current_item:
+                try:
+                    current_item['delivery_factory'] = float(line.split(':', 1)[1].strip().replace('¥', ''))
+                except:
+                    current_item['delivery_factory'] = 0
+        
+        elif line.lower().startswith('размеры:'):
+            if current_item:
+                try:
+                    dims = [float(x) for x in line.split(':', 1)[1].strip().split()]
+                    if len(dims) == 3:
+                        current_item['dims'] = tuple(dims)
+                        current_item['dimensions'] = f"{int(dims[0])}×{int(dims[1])}×{int(dims[2])}"
+                except:
+                    pass
+        
+        # Курсы и комиссия
+        elif line.lower().startswith('курс клиенту:'):
+            try:
+                client_rate = float(line.split(':', 1)[1].strip())
+            except:
+                pass
+        
+        elif line.lower().startswith('мой курс:'):
+            try:
+                real_rate = float(line.split(':', 1)[1].strip())
+            except:
+                pass
+        
+        elif line.lower().startswith('курс:'):
+            try:
+                val = line.split(':', 1)[1].strip().lower()
+                if 'клиент' in val:
+                    client_rate = float(val.replace('клиент', '').strip())
+                elif 'реальный' in val or 'мой' in val:
+                    real_rate = float(val.replace('реальный', '').replace('мой', '').strip())
+            except:
+                pass
+        
+        elif line.lower().startswith('комиссия:'):
+            try:
+                val = line.split(':', 1)[1].strip().replace('%', '')
+                commission_pct = float(val)
+            except:
+                pass
+        
+        elif 'минимальная' in line.lower() and 'комиссия' in line.lower():
+            try:
+                min_commission = float(line.split(':', 1)[1].strip().replace('amd', '').replace('֏', '').strip())
+            except:
+                pass
+    
+    # Добавляем последний товар
+    if current_item and current_item.get('name'):
+        items.append(current_item)
+    
+    if not items:
+        await update.message.reply_text(
+            '❌ Не удалось распознать товары.\n\n'
+            'Проверь формат. Отправь /paste для примера.',
+            parse_mode='HTML'
+        )
+        return
+    
+    # Расчёты
+    total_client_cny = sum(item['qty'] * item['price'] for item in items)
+    total_delivery_cny = sum(item['delivery_factory'] for item in items)
+    total_purchase_cny = sum(item['qty'] * item['purchase'] for item in items)
+    total_cny = total_client_cny + total_delivery_cny
+    
+    # Расчёт в AMD
+    total_client_amd = total_cny * client_rate
+    total_purchase_amd = (total_purchase_cny + total_delivery_cny) * real_rate
+    
+    # Комиссия
+    commission_amd = total_client_amd * (commission_pct / 100)
+    if commission_amd < min_commission:
+        commission_amd = min_commission
+        commission_note = f"минимум {min_commission:,.0f} AMD"
+    else:
+        commission_note = f"{commission_pct}%"
+    
+    # Итого к оплате
+    final_total_amd = total_client_amd + commission_amd
+    profit_amd = total_client_amd - total_purchase_amd
+    
+    # Оптимизация коробок
+    boxes_optimized = optimize_boxes([{'name': i['name'], 'qty': i['qty'], 'dims': i['dims'], 'volume': i['dims'][0]*i['dims'][1]*i['dims'][2]} for i in items])
+    total_boxes = len(boxes_optimized)
+    
+    # Формируем сообщение для клиента
+    msg_client = f'<b>Товары:</b>\n'
+    for item in items:
+        subtotal = item['qty'] * item['price']
+        item_total = subtotal + item['delivery_factory']
+        msg_client += (
+            f"• {item['name']}: {item['qty']} шт × {item['price']}¥ = {subtotal:.1f}¥"
+            f" + {item['delivery_factory']}¥ = {item_total:.1f}¥\n"
+        )
+    
+    msg_client += '━━━━━━━━━━\n'
+    msg_client += f'<b>Товар:</b> {total_client_cny:.1f}¥\n'
+    msg_client += f'<b>Доставка:</b> {total_delivery_cny:.1f}¥\n'
+    msg_client += f'<b>Курс:</b> {client_rate}\n'
+    msg_client += '━━━━━━━━━━\n'
+    msg_client += f'<b>Итого:</b> {total_cny:.1f}¥ = {total_client_amd:,.0f} AMD\n'
+    msg_client += f'<b>Комиссия:</b> {commission_amd:,.0f} AMD\n'
+    msg_client += '━━━━━━━━━━\n'
+    msg_client += f'<b>К ОПЛАТЕ:</b> {final_total_amd:,.0f} AMD'
+    
+    # Формируем сообщение для себя (админ)
+    msg_admin = f'📦 <b>Коробки:</b> {total_boxes} шт\n\n'
+    
+    msg_admin += '<b>💰 Расчёт:</b>\n'
+    msg_admin += f'Клиенту: {total_client_amd:,.0f} AMD\n'
+    msg_admin += f'Закупка: {total_purchase_amd:,.0f} AMD\n'
+    if commission_amd == min_commission:
+        msg_admin += f'Комиссия {commission_pct}% = {total_client_amd * commission_pct / 100:,.0f} AMD → минимум {commission_amd:,.0f} AMD\n'
+    else:
+        msg_admin += f'Комиссия {commission_pct}%: {commission_amd:,.0f} AMD\n'
+    msg_admin += '━━━━━━━━━━\n'
+    msg_admin += f'<b>К ОПЛАТЕ:</b> {final_total_amd:,.0f} AMD\n'
+    msg_admin += f'<b>Прибыль:</b> {profit_amd:,.0f} AMD'
+    
+    # Кнопки действий
+    keyboard = [
+        [InlineKeyboardButton("💾 Сохранить в Notion", callback_data=f'paste_save_{uid}')],
+        [InlineKeyboardButton("📦 Расчитать FF", callback_data=f'paste_ff_{uid}')],
+        [InlineKeyboardButton("🚚 Расчитать доставку", callback_data=f'paste_dostavka_{uid}')],
+    ]
+    
+    # Сохраняем в сессию
+    orders[uid] = {
+        'type': 'paste',
+        'items': items,
+        'client': client,
+        'client_rate': client_rate,
+        'real_rate': real_rate,
+        'commission_pct': commission_pct,
+        'min_commission': min_commission,
+        'total_cny': total_cny,
+        'total_client_amd': total_client_amd,
+        'total_purchase_amd': total_purchase_amd,
+        'commission_amd': commission_amd,
+        'final_total_amd': final_total_amd,
+        'profit_amd': profit_amd,
+        'total_boxes': total_boxes
+    }
+    
+    # Отправляем первое сообщение - клиенту
+    await update.message.reply_text(
+        msg_client,
+        parse_mode='HTML'
+    )
+    
+    # Отправляем второе сообщение - себе (с кнопками)
+    await update.message.reply_text(
+        msg_admin,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+
+async def paste_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка кнопок после /paste"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    uid = str(update.effective_user.id)
+    
+    if uid not in orders or orders[uid].get('type') != 'paste':
+        await query.edit_message_text('❌ Данные устарели. Выполни /paste снова.')
+        return
+    
+    items = orders[uid]['items']
+    
+    if data.startswith('paste_save_'):
+        # Сохраняем в Notion
+        # Генерируем код заказа
+        order_code = f"PASTE-{datetime.now().strftime('%y%m%d-%H%M')}"
+        # Сохраняем в Notion
+        # Генерируем код заказа
+        order_code = f"PASTE-{datetime.now().strftime('%y%m%d-%H%M')}"
+        
+        # Формируем текст для Notion
+        items_text = '\n'.join([
+            f"• {i['name']}: {i['qty']} шт × {i['price']}¥ = {i['total']:.1f}¥"
+            for i in items
+        ])
+        
+        notion_data = {
+            'order_code': order_code,
+            'client': 'Paste',
+            'items_text': items_text,
+            'total_cny': total,
+            'status': 'Новый'
+        }
+        
+        url = await save_order_to_notion(notion_data)
+        
+        if url:
+            await query.edit_message_text(
+                f'✅ Сохранено в Notion\n\n'
+                f'📋 {order_code}\n'
+                f'💰 Итого: {total:.1f}¥\n\n'
+                f'<a href="{url}">Открыть в Notion</a>',
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+        else:
+            await query.edit_message_text(
+                f'⚠️ Не удалось сохранить в Notion\n\n'
+                f'📋 {order_code}\n'
+                f'💰 Итого: {total:.1f}¥'
+            )
+    
+    elif data.startswith('paste_ff_'):
+        # Конвертируем в формат /ff
+        orders[uid]['type'] = 'ff'
+        orders[uid]['client'] = 'Paste'
+        orders[uid]['ff_bundles'] = []
+        orders[uid]['ff_single_items'] = []
+        orders[uid]['ff_items_in_bundles'] = set()
+        
+        # Преобразуем items в формат с dims
+        for item in items:
+            item['dims'] = (0, 0, 0)
+            item['dimensions'] = ''
+            item['is_bundle'] = False
+            item['bundle_name'] = None
+        
+        await query.edit_message_text('📦 Перехожу к расчёту FF...')
+        await show_ff_main_menu(update, context, uid)
+    
+    elif data.startswith('paste_dostavka_'):
+        # Конвертируем в формат /dostavka
+        orders[uid]['type'] = 'dostavka'
+        orders[uid]['client'] = 'Paste'
+        
+        for item in items:
+            item['dims'] = (0, 0, 0)
+            item['dimensions'] = ''
+        
+        await query.edit_message_text('🚚 Перехожу к расчёту доставки...')
+        # Вызываем dostavka (нужно добавить соответствующую функцию)
+        await start_dostavka(update, context)
+
 # ======== MAIN ========
 
 def main():
@@ -2070,8 +3095,12 @@ def main():
             Z_DELIVERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_delivery)],
             Z_BUNDLE_SELECT: [CallbackQueryHandler(z_bundle_select_cb, pattern='^z_bundle_')],
             Z_BUNDLE_NEW: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_bundle_new_name)],
+            Z_BUNDLE_NEW_FROM_CURRENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_bundle_new_from_current_name)],
             Z_DIMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_dims)],
-            Z_MORE: [CallbackQueryHandler(z_more_cb, pattern='^z_more_')],
+            Z_MORE: [
+                CallbackQueryHandler(z_more_cb, pattern='^z_more_'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, z_more_text_handler)
+            ],
             Z_CLIENT_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_client_rate)],
             Z_REAL_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_real_rate)],
             Z_COMMISSION: [CallbackQueryHandler(z_commission_cb, pattern='^z_comm_')],
@@ -2080,16 +3109,26 @@ def main():
     )
     app.add_handler(zakaz_conv)
     
-    # /ff
+    # /ff v38
     ff_conv = ConversationHandler(
         entry_points=[CommandHandler('ff', cmd_ff)],
         states={
             F_SELECT_ORDER: [CallbackQueryHandler(f_select_order_cb, pattern='^sel_order_')],
-            F_MAIN_MENU: [CallbackQueryHandler(ff_main_menu_cb, pattern='^ff_mode_')],
-            F_PACKAGES: [CallbackQueryHandler(f_package_cb, pattern='^f_pkg_select_|^f_pkg_custom$')],
-            F_PACKAGE_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, f_package_price)],
-            F_WORK: [MessageHandler(filters.TEXT & ~filters.COMMAND, f_work)],
-            F_THERMAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, f_thermal)],
+            F_MAIN_MENU: [CallbackQueryHandler(ff_main_menu_cb, pattern='^ff_mode_|^ff_back_menu$')],
+            F_SINGLE_ITEMS: [
+                CallbackQueryHandler(ff_single_cb, pattern='^ff_single_'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ff_single_price)
+            ],
+            F_BUNDLE_CREATE: [CallbackQueryHandler(ff_bundle_cb, pattern='^ff_bundle_')],
+            F_BUNDLE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_bundle_name)],
+            F_BUNDLE_DIMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_bundle_dims)],
+            F_BUNDLE_PACKAGE: [
+                CallbackQueryHandler(ff_bundle_package_cb, pattern='^ff_bundle_pkg_'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ff_bundle_price)
+            ],
+            F_BUNDLE_THERMAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_bundle_thermal)],
+            F_BUNDLE_WORK: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_bundle_work)],
+            F_SUMMARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_summary_work)],
         },
         fallbacks=[CommandHandler('cancel', cmd_cancel)],
     )
@@ -2110,7 +3149,14 @@ def main():
     )
     app.add_handler(dostavka_conv)
     
-    logger.info("Bot starting...")
+    # Start command
+    app.add_handler(CommandHandler('start', start))
+    
+    # Paste command
+    app.add_handler(CommandHandler('paste', cmd_paste))
+    app.add_handler(CallbackQueryHandler(paste_callback_handler, pattern='^paste_'))
+    
+    logger.info("Bot v38 starting...")
     app.run_polling()
 
 if __name__ == '__main__':
