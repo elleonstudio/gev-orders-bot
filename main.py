@@ -74,7 +74,7 @@ def get_code(client):
 
 def calculate_boxes(l, w, h, qty):
     """Расчёт количества коробок с учётом макс. размеров"""
-    MAX_L, MAX_W, MAX_H = 60, 50, 40
+    MAX_L, MAX_W, MAX_H = 60, 40, 40  # ИСПРАВЛЕНО: было 60,50,40
     
     items_per_box_l = max(1, int(MAX_L // l))
     items_per_box_w = max(1, int(MAX_W // w))
@@ -114,84 +114,105 @@ def find_best_package(packages, l, w, h):
     return min(suitable, key=lambda p: p['volume'])
 
 async def get_client_orders_from_notion(client_name):
-    """Получаем все заказы клиента из Notion с обработкой ошибок"""
+    """Получаем все заказы клиента из Notion с обработкой ошибок (case-insensitive)"""
     if not notion or not NOTION_DATABASE_ID:
         return None, "Notion не настроен"
     
     try:
+        # Получаем больше заказов и фильтруем вручную (case-insensitive)
         res = notion.databases.query(
             database_id=NOTION_DATABASE_ID,
-            filter={"property": "Клиент", "select": {"equals": client_name}},
             sorts=[{"timestamp": "created_time", "direction": "descending"}],
-            page_size=10
+            page_size=100
         )
+        
         orders_list = []
+        client_name_lower = client_name.lower()
+        
         for page in res.get('results', []):
             props = page['properties']
-            created = page.get('created_time', '')[:10]
-            items_text = props.get('Описание товара', {}).get('rich_text', [{}])[0].get('text', {}).get('content', '')
-            items_list = []
-            seen_names = set()  # Для дедупликации
-            for item_str in items_text.split(';'):
-                item_str = item_str.strip()
-                if item_str:
-                    # Пробуем разные форматы: "Name × 100", "Name x 100", "Name 100"
-                    name = item_str
-                    qty = 0
-                    
-                    # Ищем × ( multiplication sign)
-                    if '×' in item_str:
-                        parts = item_str.rsplit('×', 1)
-                        name = parts[0].strip()
-                        try:
-                            qty = int(parts[1].strip().split()[0])  # Берём только число
-                        except:
-                            qty = 0
-                    # Ищем x (латинская)
-                    elif ' x ' in item_str.lower():
-                        parts = item_str.lower().rsplit(' x ', 1)
-                        name = item_str[:item_str.lower().rfind(' x ')].strip()
-                        try:
-                            qty = int(parts[1].strip().split()[0])
-                        except:
-                            qty = 0
-                    # Пробуем взять последнее число как количество
-                    else:
-                        numbers = re.findall(r'\d+', item_str)
-                        if numbers:
+            # Получаем имя клиента из заказа
+            order_client = props.get('Клиент', {}).get('select', {}).get('name', '')
+            
+            # Case-insensitive сравнение
+            if order_client and order_client.lower() == client_name_lower:
+                created = page.get('created_time', '')[:10]
+                items_text = props.get('Описание товара', {}).get('rich_text', [{}])[0].get('text', {}).get('content', '')
+                items_list = []
+                seen_names = set()  # Для дедупликации
+                for item_str in items_text.split(';'):
+                    item_str = item_str.strip()
+                    if item_str:
+                        # Пробуем разные форматы: "Name × 100", "Name x 100", "Name 100"
+                        name = item_str
+                        qty = 0
+                        
+                        # Ищем × (multiplication sign)
+                        if '×' in item_str:
+                            parts = item_str.rsplit('×', 1)
+                            name = parts[0].strip()
                             try:
-                                qty = int(numbers[-1])
-                                # Убираем число из названия
-                                name = re.sub(r'\s*\d+\s*$', '', item_str).strip()
+                                qty = int(parts[1].strip().split()[0])  # Берём только число
                             except:
                                 qty = 0
-                    
-                    # Пропускаем дубликаты по названию
-                    if name and name not in seen_names:
-                        seen_names.add(name)
-                        items_list.append({'name': name, 'qty': qty})
-            
-            order = {
-                'id': page['id'],
-                'code': props.get('Код заказа', {}).get('title', [{}])[0].get('text', {}).get('content', ''),
-                'date': created,
-                'client_rate': props.get('Курс клиенту', {}).get('number'),
-                'real_rate': props.get('Курс реальный', {}).get('number'),
-                'rub_rate': props.get('Курс ₽→драм', {}).get('number'),
-                'items_text': items_text,
-                'items': items_list,
-                'total': props.get('К ОПЛАТЕ (AMD)', {}).get('number') or props.get('Прибыль (AMD)', {}).get('number'),
-            }
-            orders_list.append(order)
+                        # Ищем x (латинская)
+                        elif ' x ' in item_str.lower():
+                            parts = item_str.lower().rsplit(' x ', 1)
+                            name = item_str[:item_str.lower().rfind(' x ')].strip()
+                            try:
+                                qty = int(parts[1].strip().split()[0])
+                            except:
+                                qty = 0
+                        # Пробуем взять последнее число как количество
+                        else:
+                            numbers = re.findall(r'\d+', item_str)
+                            if numbers:
+                                try:
+                                    qty = int(numbers[-1])
+                                    # Убираем число из названия
+                                    name = re.sub(r'\s*\d+\s*$', '', item_str).strip()
+                                except:
+                                    qty = 0
+                        
+                        # Пропускаем дубликаты по названию
+                        if name and name not in seen_names:
+                            seen_names.add(name)
+                            items_list.append({'name': name, 'qty': qty})
+                
+                # Получаем размеры из Notion
+                dimensions_str = props.get('Размеры (Д×Ш×В)', {}).get('rich_text', [{}])[0].get('text', {}).get('content', '')
+                dims = (0, 0, 0)
+                if dimensions_str and '×' in dimensions_str:
+                    try:
+                        dim_parts = dimensions_str.split('×')
+                        if len(dim_parts) == 3:
+                            dims = (float(dim_parts[0]), float(dim_parts[1]), float(dim_parts[2]))
+                    except:
+                        dims = (0, 0, 0)
+                
+                # Добавляем размеры к каждому товару
+                for item in items_list:
+                    item['dimensions'] = dimensions_str
+                    item['dims'] = dims
+                
+                order = {
+                    'id': page['id'],
+                    'code': props.get('Код заказа', {}).get('title', [{}])[0].get('text', {}).get('content', ''),
+                    'date': created,
+                    'client_rate': props.get('Курс клиенту', {}).get('number'),
+                    'real_rate': props.get('Курс реальный', {}).get('number'),
+                    'rub_rate': props.get('Курс ₽→драм', {}).get('number'),
+                    'items_text': items_text,
+                    'items': items_list,
+                    'total': props.get('К ОПЛАТЕ (AMD)', {}).get('number') or props.get('Прибыль (AMD)', {}).get('number'),
+                }
+                orders_list.append(order)
         return orders_list, None
     except Exception as e:
         error_str = str(e)
-        # Если клиент не найден в списке select — возвращаем пустой список
-        if 'select option' in error_str and 'not found' in error_str:
-            logger.info(f"Клиент '{client_name}' не найден в списке Notion — создаём нового")
-            return [], None  # Пустой список = новый клиент
         error_msg = f"{type(e).__name__}: {error_str}"
         logger.error(f"Error fetching client orders: {error_msg}")
+        return None, error_msg
         logger.error(traceback.format_exc())
         return None, error_msg
 
@@ -818,24 +839,12 @@ async def z_get_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current['items_per_box'] = items_per_box
         current['boxes'] = boxes
         
-        # Расчёт объёма
-        item_volume = l * w * h
-        box_volume = 60 * 50 * 40
-        total_items_volume = item_volume * qty
-        total_boxes_volume = box_volume * boxes
-        free_volume = total_boxes_volume - total_items_volume
-        fill_percent = (total_items_volume / total_boxes_volume) * 100
-        
         keyboard = [[InlineKeyboardButton("Да", callback_data='z_more_yes'), 
                      InlineKeyboardButton("Нет", callback_data='z_more_no')]]
         await update.message.reply_text(
-            f'📐 Размеры товара: {int(l)}×{int(w)}×{int(h)} см = {item_volume:,} см³\n'
-            f'📦 Объём коробки: 60×50×40 = {box_volume:,} см³\n'
+            f'📐 Размеры: {int(l)}×{int(w)}×{int(h)} см\n'
             f'📦 В короб влезет: ~{items_per_box} шт\n'
-            f'📦 Коробок нужно: {boxes}\n\n'
-            f'📊 Заполнение:\n'
-            f'   Занято: {total_items_volume:,} см³ ({fill_percent:.1f}%)\n'
-            f'   Свободно: {free_volume:,} см³ ({100-fill_percent:.1f}%)\n\n'
+            f'📦 Коробок: {boxes}\n\n'
             f'Ещё товар?',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -1113,7 +1122,7 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ======== /FF ========
 
-F_SELECT_ORDER, F_MAIN_MENU, F_SINGLE_ITEMS, F_BUNDLE_CREATE, F_BUNDLE_DIMS, F_BUNDLE_PACKAGE, F_PACKAGES, F_PACKAGE_PRICE, F_WORK, F_THERMAL, F_BUNDLE_WORK, F_SUMMARY = range(12)
+F_SELECT_ORDER, F_MAIN_MENU, F_SINGLE_ITEMS, F_BUNDLE_CREATE, F_BUNDLE_DIMS, F_BUNDLE_PACKAGE, F_PACKAGES, F_BUNDLE_THERMAL, F_BUNDLE_WORK, F_SUMMARY = range(10)
 
 async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -1258,8 +1267,8 @@ async def load_order_data(uid, order_idx):
                 'price': 0,
                 'purchase': 0,
                 'delivery_factory': 0,
-                'dimensions': '',
-                'dims': (0, 0, 0),
+                'dimensions': i.get('dimensions', ''),
+                'dims': i.get('dims', (0, 0, 0)),
                 'boxes': 1,
                 'is_bundle': i.get('is_bundle', False)
             } for i in order['items'] if i.get('name')]
