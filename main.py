@@ -152,10 +152,9 @@ async def save_to_notion(uid):
             "Курс клиенту": {"number": float(client_rate)},
             "Курс реальный": {"number": float(real_rate)},
             "Закупка реальная (AMD)": {"number": float(purchase_real_amd)},
-            " На закупку (AMD)": {"number": float(purchase_real_amd)},
+            "На закупку (AMD)": {"number": float(purchase_real_amd)},
             "На закупку (CNY)": {"number": float(total_purchase_cny + delivery_cny)},
             " К ОПЛАТЕ (AMD)": {"number": float(total_amd)},
-            "  К ОПЛАТЕ ": {"number": float(total_amd)},
             " Инвойс": {"select": {"name": "Да" if data.get('invoice_needed') else "Нет"}},
             "Статус": {"select": {"name": "Новый"}},
             "Date": {"date": {"start": datetime.now().strftime('%Y-%m-%d')}}
