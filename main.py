@@ -1344,19 +1344,70 @@ async def f_select_order_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             items_summary = order.get('items_text', 'Товар')[:40]
         
         # Проверяем, есть ли товары с размерами
-        if not orders[uid].get('items') or not any(i.get('dims', (0,0,0))[0] > 0 for i in orders[uid]['items']):
+        items_for_debug = orders[uid].get('items', [])
+        logger.info(f"DEBUG: items count = {len(items_for_debug)}")
+        for idx, it in enumerate(items_for_debug[:3]):
+            logger.info(f"DEBUG: item {idx}: name={it.get('name')}, dims={it.get('dims')}, has_dims={it.get('dims', (0,0,0))[0] > 0}")
+        
+        if not items_for_debug or not any(i.get('dims', (0,0,0))[0] > 0 for i in items_for_debug):
+            # Дебаг-информация для пользователя
+            debug_info = ""
+            if items_for_debug:
+                debug_info = "\n\nТовары в заказе:\n"
+                for it in items_for_debug[:5]:
+                    d = it.get('dims', (0,0,0))
+                    debug_info += f"• {it.get('name', '?')}: dims={d}\n"
+            else:
+                debug_info = "\n\nТовары: пустой список"
+            
             await query.edit_message_text(
                 f'⚠️ Выбрано: {items_summary}\n\n'
-                f'В заказе нет размеров товаров.\n'
+                f'В заказе нет размеров товаров.{debug_info}\n'
                 f'Нужно пересчитать через /zakaz {orders[uid]["client"]}'
             )
             return ConversationHandler.END
         
         await query.edit_message_text(f'📦 FF: {items_summary}')
-        await start_ff(update, context, uid)
-        return F_PACKAGES
+        
+        # Показываем меню выбора режима
+        keyboard = [
+            [InlineKeyboardButton("📦 Считать по одиночке", callback_data='ff_mode_single')],
+            [InlineKeyboardButton("📦 Собрать набор", callback_data='ff_mode_bundle')],
+        ]
+        await query.message.reply_text(
+            f'📦 FF Китай — Выбор режима\n\n'
+            f'Товары: {items_summary}\n'
+            f'Создано наборов: 0',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return F_MAIN_MENU
     except Exception as e:
         logger.error(f"Ошибка в f_select_order_cb: {e}")
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
+        return ConversationHandler.END
+
+async def ff_main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора режима FF"""
+    query = update.callback_query
+    await query.answer()
+    uid = str(update.effective_user.id)
+    
+    try:
+        if query.data == 'ff_mode_single':
+            # Режим "по одиночке" — каждый товар отдельно
+            await query.edit_message_text('📦 Режим: по одиночке')
+            await start_ff(update, context, uid)
+            return F_PACKAGES
+            
+        elif query.data == 'ff_mode_bundle':
+            # Режим "собрать набор" — объединяем товары
+            await query.edit_message_text('📦 Режим: собрать набор')
+            # TODO: добавить логику создания набора
+            await start_ff(update, context, uid)
+            return F_PACKAGES
+            
+    except Exception as e:
+        logger.error(f"Ошибка в ff_main_menu_cb: {e}")
         await query.edit_message_text(f'❌ Ошибка: {str(e)[:100]}')
         return ConversationHandler.END
 
@@ -2034,6 +2085,7 @@ def main():
         entry_points=[CommandHandler('ff', cmd_ff)],
         states={
             F_SELECT_ORDER: [CallbackQueryHandler(f_select_order_cb, pattern='^sel_order_')],
+            F_MAIN_MENU: [CallbackQueryHandler(ff_main_menu_cb, pattern='^ff_mode_')],
             F_PACKAGES: [CallbackQueryHandler(f_package_cb, pattern='^f_pkg_select_|^f_pkg_custom$')],
             F_PACKAGE_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, f_package_price)],
             F_WORK: [MessageHandler(filters.TEXT & ~filters.COMMAND, f_work)],
