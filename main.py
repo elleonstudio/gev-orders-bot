@@ -2,7 +2,6 @@ import os
 import logging
 import math
 import json
-import re
 import traceback
 from datetime import datetime
 from notion_client import Client
@@ -41,41 +40,48 @@ def load_session():
             orders = json.load(f)
     except: orders = {}
 
-def fmt(n): return int(n) if n == int(n) else n
-
 def get_code(client):
     return f"{client.upper().replace(' ', '-')}-{datetime.now().strftime('%y%m%d')}"
 
 def optimize_boxes(items):
+    """ПРАВИЛЬНЫЙ АЛГОРИТМ 3D: Считает сколько коробок 60x40x40 понадобится"""
     MAX_L, MAX_W, MAX_H = 60, 40, 40
-    BOX_VOLUME = MAX_L * MAX_W * MAX_H
-    all_items = []
+    boxes = 0
+    remaining_vol = 0
+    
     for item in items:
         l, w, h = item.get('dims', (0,0,0))
-        volume = l * w * h
-        for _ in range(item.get('qty', 0)):
-            if volume > 0:
-                all_items.append({'name': item['name'], 'dims': (l, w, h), 'volume': volume})
-    
-    all_items.sort(key=lambda x: x['volume'], reverse=True)
-    boxes = []
-    
-    for item in all_items:
-        l, w, h = item['dims']
-        placed = False
-        for box in boxes:
-            if box['remaining_volume'] >= item['volume']:
-                can_fit = False
-                for rot_l, rot_w, rot_h in [(l,w,h), (l,h,w), (w,l,h), (w,h,l), (h,l,w), (h,w,l)]:
-                    if rot_l <= (MAX_L - box['used_l']) and rot_w <= (MAX_W - box['used_w']) and rot_h <= (MAX_H - box['used_h']):
-                        can_fit = True
-                        box['used_l'] += rot_l; box['used_w'] += rot_w; box['used_h'] += rot_h
-                        break
-                if can_fit:
-                    box['items'].append(item); box['remaining_volume'] -= item['volume']; placed = True; break
-        if not placed:
-            boxes.append({'items': [item], 'remaining_volume': BOX_VOLUME - item['volume'], 'used_l': l, 'used_w': w, 'used_h': h})
-    return boxes
+        qty = item.get('qty', 0)
+        if l*w*h == 0 or qty <= 0: continue
+        
+        # Ищем идеальный вариант укладки (вращаем предмет)
+        best_fit = 0
+        for rot_l, rot_w, rot_h in [(l,w,h), (l,h,w), (w,l,h), (w,h,l), (h,l,w), (h,w,l)]:
+            fit = int(MAX_L // rot_l) * int(MAX_W // rot_w) * int(MAX_H // rot_h)
+            if fit > best_fit: best_fit = fit
+        
+        if best_fit == 0: 
+            boxes += qty # Предмет слишком большой, кладем по одному
+            continue
+            
+        item_vol = l * w * h
+        
+        # Закидываем остатки в предыдущую коробку, если есть место
+        if remaining_vol >= item_vol:
+            fit_in_rem = min(qty, int(remaining_vol // item_vol))
+            qty -= fit_in_rem
+            remaining_vol -= fit_in_rem * item_vol
+            
+        if qty > 0:
+            needed_boxes = qty // best_fit
+            boxes += needed_boxes
+            leftover = qty % best_fit
+            
+            if leftover > 0:
+                boxes += 1
+                remaining_vol = (MAX_L * MAX_W * MAX_H) - (leftover * item_vol)
+                
+    return int(boxes)
 
 # ======== NOTION API ========
 async def get_packages_from_notion():
@@ -275,14 +281,14 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg_client, parse_mode='HTML')
 
-    # Проверка клиента в базе
+    # Проверка старых заказов в Notion
     client_orders, _ = await get_client_orders_from_notion(client)
     keyboard = []
     
     if client_orders:
         orders[uid]['existing_notion_page_id'] = client_orders[0]['id']
         last_date = client_orders[0].get('date', 'неизвестно')
-        msg_admin += f"\n\n⚠️ <b>Клиент найден в базе!</b> (Заказ от: {last_date})"
+        msg_admin += f"\n\n⚠️ <b>Клиент найден в базе!</b> (Последний заказ: {last_date})"
         keyboard.append([InlineKeyboardButton("🔄 Обновить старый заказ", callback_data='paste_update')])
         keyboard.append([InlineKeyboardButton("➕ Сохранить как НОВЫЙ", callback_data='paste_new')])
     else:
@@ -463,7 +469,7 @@ async def show_ff_main_menu(update_or_query, uid):
         else: msg += f"☐ {item['name']}\n"
     
     msg += f"\n<b>Создано наборов:</b> {len(bundles)}\n"
-    for b in bundles: msg += f"  📦 {b.get('name', 'Без имени')}\n"
+    for b in bundles: msg += f"  📦 {b.get('name', 'Без имени')} (Кол-во: {b.get('qty', 1)})\n"
     
     keyboard = [
         [InlineKeyboardButton("📦 Считать по одиночке", callback_data='ff_mode_single')],
@@ -512,8 +518,10 @@ async def ff_box_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bundles = orders[uid].get('ff_bundles', [])
         single_items_list = [s['item'] for s in orders[uid].get('ff_single_items', [])]
         
-        bundle_boxes = len(bundles)
-        single_boxes = len(optimize_boxes(single_items_list))
+        bundle_items_for_box = [{'name': b['name'], 'dims': b['dims'], 'qty': b.get('qty', 1)} for b in bundles]
+        
+        bundle_boxes = optimize_boxes(bundle_items_for_box)
+        single_boxes = optimize_boxes(single_items_list)
         total_boxes = bundle_boxes + single_boxes
         
         orders[uid]['ff_boxes_total'] = total_boxes * box_price
@@ -592,7 +600,12 @@ async def ff_single_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ff_single_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    price = float(update.message.text)
+    try:
+        price = float(update.message.text)
+    except:
+        await update.message.reply_text("Введи число:")
+        return F_SINGLE_ITEMS
+        
     idx = orders[uid]['ff_single_index']
     item_idx, item = orders[uid]['ff_single_available'][idx]
     
@@ -636,15 +649,34 @@ async def ff_bundle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ff_bundle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id); orders[uid]['ff_b_name'] = update.message.text.strip()
-    await update.message.reply_text("Размеры готового набора (Д Ш В в см):\nЭти размеры нужны для расчета коробок"); return F_BUNDLE_DIMS
+    await update.message.reply_text("Размеры ОДНОГО готового набора (Д Ш В в см):\nЭти размеры нужны для расчета коробок"); return F_BUNDLE_DIMS
 
 async def ff_bundle_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id); orders[uid]['ff_b_dims'] = tuple(map(float, update.message.text.split()))
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['ff_b_dims'] = tuple(map(float, update.message.text.split()))
+    except:
+        await update.message.reply_text("❌ Ошибка формата. Введи 3 числа (например: 16 12 5):")
+        return F_BUNDLE_DIMS
+        
+    # === АВТОРАСЧЕТ КОЛИЧЕСТВА НАБОРОВ ===
+    selected_indices = orders[uid].get('ff_bundle_selected', set())
+    items = orders[uid]['items']
+    
+    if not selected_indices:
+        bundle_qty = 1
+    else:
+        bundle_qty = min(items[i].get('qty', 1) for i in selected_indices)
+        
+    orders[uid]['ff_b_qty'] = bundle_qty
+    await update.message.reply_text(f"🤖 Бот рассчитал: получается <b>{bundle_qty} наборов</b>.", parse_mode='HTML')
+        
     packages = await get_packages_from_notion()
     orders[uid]['ff_available_packages'] = packages
     keyboard = [[InlineKeyboardButton(f"📦 {p['name']} — {p['price']}¥", callback_data=f'ff_b_pkg_{i}')] for i, p in enumerate(packages)]
     keyboard.append([InlineKeyboardButton("💰 Своя цена", callback_data='ff_b_custom')])
-    await update.message.reply_text("Выбери пакет для набора:", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    await update.message.reply_text("Выбери пакет для упаковки 1 набора:", reply_markup=InlineKeyboardMarkup(keyboard))
     return F_BUNDLE_PACKAGE
 
 async def ff_bundle_package_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -654,28 +686,38 @@ async def ff_bundle_package_cb(update: Update, context: ContextTypes.DEFAULT_TYP
     
     pkg_idx = int(query.data.replace('ff_b_pkg_', ''))
     orders[uid]['ff_b_pkg'] = orders[uid]['ff_available_packages'][pkg_idx]
-    await query.edit_message_text("Кол-во термобумаги (листов) или 'auto':"); return F_BUNDLE_THERMAL
+    await query.edit_message_text("Кол-во термобумаги на 1 набор (листов) или 'auto':"); return F_BUNDLE_THERMAL
 
 async def ff_bundle_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    orders[uid]['ff_b_pkg'] = {'name': 'Ручной', 'price': float(update.message.text)}
-    await update.message.reply_text("Кол-во термобумаги (листов) или 'auto':"); return F_BUNDLE_THERMAL
+    try:
+        orders[uid]['ff_b_pkg'] = {'name': 'Ручной', 'price': float(update.message.text)}
+    except:
+        await update.message.reply_text("Введи число:")
+        return F_BUNDLE_PACKAGE
+    await update.message.reply_text("Кол-во термобумаги на 1 набор (листов) или 'auto':"); return F_BUNDLE_THERMAL
 
 async def ff_bundle_thermal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id); txt = update.message.text.strip().lower()
     sheets = 1 if txt == 'auto' else float(txt)
     orders[uid]['ff_b_thermal'] = sheets * 0.016
-    await update.message.reply_text("Цена сборки набора (¥):"); return F_BUNDLE_WORK
+    await update.message.reply_text("Цена сборки ЗА 1 НАБОР (¥):"); return F_BUNDLE_WORK
 
 async def ff_bundle_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    work = float(update.message.text)
+    try:
+        work = float(update.message.text)
+    except:
+        await update.message.reply_text("Введи число:")
+        return F_BUNDLE_WORK
     
-    b_total = orders[uid]['ff_b_pkg']['price'] + orders[uid]['ff_b_thermal'] + work
+    qty = orders[uid]['ff_b_qty']
+    b_total = (orders[uid]['ff_b_pkg']['price'] + orders[uid]['ff_b_thermal'] + work) * qty
     
     orders[uid]['ff_bundles'].append({
         'name': orders[uid]['ff_b_name'],
         'dims': orders[uid]['ff_b_dims'],
+        'qty': qty,
         'pkg': orders[uid]['ff_b_pkg'],
         'thermal': orders[uid]['ff_b_thermal'],
         'work_price': work,
@@ -690,17 +732,20 @@ async def ff_bundle_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ff_summary_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    single_work = float(update.message.text)
+    try:
+        single_work = float(update.message.text)
+    except:
+        await update.message.reply_text("Введи число:")
+        return F_SUMMARY
     
     bundles = orders[uid].get('ff_bundles', [])
     single_items = orders[uid].get('ff_single_items', [])
     
-    packages_total = sum(s['total'] for s in single_items) + sum(b['pkg']['price'] for b in bundles)
+    bundles_total = sum(b['total'] for b in bundles)
+    single_total = sum(s['total'] for s in single_items)
     boxes_total = orders[uid].get('ff_boxes_total', 0)
-    bundle_thermal_total = sum(b['thermal'] for b in bundles)
-    bundle_work_total = sum(b['work_price'] for b in bundles)
     
-    ff_total = packages_total + boxes_total + bundle_thermal_total + bundle_work_total + single_work
+    ff_total = bundles_total + single_total + boxes_total + single_work
     orders[uid]['ff_total_yuan'] = ff_total
     
     url = await save_to_notion(uid)
@@ -726,7 +771,13 @@ async def d_warehouse_cb(update, context):
 
 async def d_boxes(update, context):
     uid = str(update.effective_user.id)
-    boxes = int(update.message.text); city = orders[uid]['current_wh']
+    try:
+        boxes = int(update.message.text)
+    except:
+        await update.message.reply_text("Введи число:")
+        return D_BOXES
+        
+    city = orders[uid]['current_wh']
     
     if city == 'Свой тариф':
         await update.message.reply_text("Этот склад требует ручного тарифа. Выбери другой через /dostavka"); return ConversationHandler.END
@@ -810,7 +861,7 @@ def main():
         fallbacks=[CommandHandler('cancel', lambda u,c: ConversationHandler.END)]
     ))
 
-    logger.info("Бот запущен. Версия v44 (Complete & Fixed)")
+    logger.info("Бот запущен. Версия v46 (Auto-Bundle & Full Build)")
     app.run_polling()
 
 if __name__ == '__main__': main()
