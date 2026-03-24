@@ -3,6 +3,7 @@ import logging
 import math
 import json
 import traceback
+import re
 from datetime import datetime
 from notion_client import Client
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -43,6 +44,10 @@ def load_session():
 def get_code(client):
     return f"{client.upper().replace(' ', '-')}-{datetime.now().strftime('%y%m%d')}"
 
+def normalize_client_name(name):
+    """Удаляет пробелы и делает первую букву заглавной (Zaven 8291 -> Zaven8291)"""
+    return re.sub(r'\s+', '', name).capitalize()
+
 def optimize_boxes(items):
     """ПРАВИЛЬНЫЙ АЛГОРИТМ 3D: Считает сколько коробок 60x40x40 понадобится"""
     MAX_L, MAX_W, MAX_H = 60, 40, 40
@@ -54,19 +59,17 @@ def optimize_boxes(items):
         qty = item.get('qty', 0)
         if l*w*h == 0 or qty <= 0: continue
         
-        # Ищем идеальный вариант укладки (вращаем предмет)
         best_fit = 0
         for rot_l, rot_w, rot_h in [(l,w,h), (l,h,w), (w,l,h), (w,h,l), (h,l,w), (h,w,l)]:
             fit = int(MAX_L // rot_l) * int(MAX_W // rot_w) * int(MAX_H // rot_h)
             if fit > best_fit: best_fit = fit
         
         if best_fit == 0: 
-            boxes += qty # Предмет слишком большой, кладем по одному
+            boxes += qty 
             continue
             
         item_vol = l * w * h
         
-        # Закидываем остатки в предыдущую коробку, если есть место
         if remaining_vol >= item_vol:
             fit_in_rem = min(qty, int(remaining_vol // item_vol))
             qty -= fit_in_rem
@@ -105,8 +108,15 @@ async def get_client_orders_from_notion(client_name):
     if not notion or not NOTION_DATABASE_ID: return None, "Notion не настроен"
     try:
         res = notion.databases.query(database_id=NOTION_DATABASE_ID, sorts=[{"timestamp": "created_time", "direction": "descending"}], page_size=100)
-        client_name_lower = client_name.lower()
-        filtered = [p for p in res.get('results', []) if p['properties'].get('Клиент', {}).get('select', {}).get('name', '').lower() == client_name_lower]
+        client_norm = normalize_client_name(client_name).lower()
+        filtered = []
+        
+        for p in res.get('results', []):
+            tag = p['properties'].get('Клиент', {}).get('select', {})
+            if tag:
+                tag_name_norm = normalize_client_name(tag.get('name', '')).lower()
+                if tag_name_norm == client_norm:
+                    filtered.append(p)
         
         orders_list = []
         for page in filtered[:10]:
@@ -144,7 +154,7 @@ async def save_to_notion(uid):
         
         properties = {
             "Код заказа": {"title": [{"text": {"content": get_code(client)}}]},
-            "Клиент": {"select": {"name": client}},
+            "Клиент": {"select": {"name": client}}, # Здесь сохраняется нормализованное имя
             "Описание товара": {"rich_text": [{"text": {"content": desc_text}}]},
             "Количество": {"number": float(total_qty)},
             "Цена клиенту (CNY)": {"number": float(total_price_client_cny)},
@@ -184,7 +194,7 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.replace('/paste', '').strip()
     
     if not text:
-        await update.message.reply_text('Вставь расчёт. Пример:\nКлиент: Имя\nТовар 1:\nНазвание: Крепление\nКоличество: 400\nЦена клиенту: 6.2\nЗакупка: 4.5\nДоставка: 43.6\nРазмеры: 16 12 5\nКурс клиенту: 58\nМой курс: 55')
+        await update.message.reply_text('Вставь расчёт. Пример:\nКлиент: Zaven8291\nТовар 1:\nНазвание: Крепление\nКоличество: 400\nЦена клиенту: 6.2\nЗакупка: 4.5\nДоставка: 43.6\nРазмеры: 16 12 5\nКурс клиенту: 58\nМой курс: 55')
         return
         
     lines = text.strip().split('\n')
@@ -193,7 +203,9 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for line in lines:
         line = line.strip().lower()
         if not line: continue
-        if line.startswith('клиент:'): client = line.split(':', 1)[1].strip().title()
+        if line.startswith('клиент:'): 
+            raw_client = line.split(':', 1)[1].strip()
+            client = normalize_client_name(raw_client)
         elif line.startswith('товар'):
             if current_item and current_item.get('name'): items.append(current_item)
             current_item = {'dims': (0,0,0)}
@@ -201,14 +213,14 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if current_item is None: current_item = {'dims': (0,0,0)}
             current_item['name'] = line.split(':', 1)[1].strip().title()
         elif line.startswith('количество:'): current_item['qty'] = int(line.split(':', 1)[1].strip() or 0)
-        elif line.startswith('цена клиенту:'): current_item['price'] = float(line.split(':', 1)[1].strip().replace('¥', '') or 0)
-        elif line.startswith('закупка:'): current_item['purchase'] = float(line.split(':', 1)[1].strip().replace('¥', '') or 0)
-        elif line.startswith('доставка:'): current_item['delivery_factory'] = float(line.split(':', 1)[1].strip().replace('¥', '') or 0)
+        elif line.startswith('цена клиенту:'): current_item['price'] = float(line.split(':', 1)[1].strip().replace(',', '.').replace('¥', '') or 0)
+        elif line.startswith('закупка:'): current_item['purchase'] = float(line.split(':', 1)[1].strip().replace(',', '.').replace('¥', '') or 0)
+        elif line.startswith('доставка:'): current_item['delivery_factory'] = float(line.split(':', 1)[1].strip().replace(',', '.').replace('¥', '') or 0)
         elif line.startswith('размеры:'): 
-            try: current_item['dims'] = tuple(map(float, line.split(':', 1)[1].strip().split()[:3]))
+            try: current_item['dims'] = tuple(map(float, line.split(':', 1)[1].strip().replace(',', '.').split()[:3]))
             except: pass
-        elif line.startswith('курс клиенту:'): client_rate = float(line.split(':', 1)[1].strip())
-        elif line.startswith('мой курс:'): real_rate = float(line.split(':', 1)[1].strip())
+        elif line.startswith('курс клиенту:'): client_rate = float(line.split(':', 1)[1].strip().replace(',', '.'))
+        elif line.startswith('мой курс:'): real_rate = float(line.split(':', 1)[1].strip().replace(',', '.'))
 
     if current_item and current_item.get('name'): items.append(current_item)
     if not items: return await update.message.reply_text('❌ Ошибка парсинга товаров.')
@@ -281,14 +293,13 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg_client, parse_mode='HTML')
 
-    # Проверка старых заказов в Notion
     client_orders, _ = await get_client_orders_from_notion(client)
     keyboard = []
     
     if client_orders:
         orders[uid]['existing_notion_page_id'] = client_orders[0]['id']
         last_date = client_orders[0].get('date', 'неизвестно')
-        msg_admin += f"\n\n⚠️ <b>Клиент найден в базе!</b> (Последний заказ: {last_date})"
+        msg_admin += f"\n\n⚠️ <b>Клиент найден в базе!</b> (Заказ от: {last_date})"
         keyboard.append([InlineKeyboardButton("🔄 Обновить старый заказ", callback_data='paste_update')])
         keyboard.append([InlineKeyboardButton("➕ Сохранить как НОВЫЙ", callback_data='paste_new')])
     else:
@@ -316,7 +327,8 @@ Z_INVOICE, Z_NAME, Z_QTY, Z_PRICE, Z_PURCHASE, Z_DELIVERY, Z_DIMS, Z_MORE, Z_CLI
 async def cmd_zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     if not context.args: return ConversationHandler.END
-    client = ' '.join(context.args)
+    raw_client = ' '.join(context.args)
+    client = normalize_client_name(raw_client)
     orders[uid] = {'client': client, 'items': [], 'type': 'zakaz'}
     await update.message.reply_text(f"Клиент: {client}. Нужен инвойс?", reply_markup=InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Да", callback_data='z_inv_yes'), InlineKeyboardButton("❌ Нет", callback_data='z_inv_no')]
@@ -326,31 +338,66 @@ async def cmd_zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def z_invoice_cb(update, context):
     query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
     orders[uid]['invoice_needed'] = (query.data == 'z_inv_yes')
-    await query.edit_message_text("Название товара:"); return Z_NAME
+    await query.edit_message_text("Название товара:")
+    return Z_NAME
 
 async def z_get_name(update, context):
-    uid = str(update.effective_user.id); orders[uid]['current'] = {'name': update.message.text.strip()}
-    await update.message.reply_text("Количество:"); return Z_QTY
+    uid = str(update.effective_user.id)
+    orders[uid]['current'] = {'name': update.message.text.strip()}
+    await update.message.reply_text("Количество:")
+    return Z_QTY
 
 async def z_get_qty(update, context):
-    uid = str(update.effective_user.id); orders[uid]['current']['qty'] = int(update.message.text)
-    await update.message.reply_text("Цена клиенту (CNY):"); return Z_PRICE
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['current']['qty'] = int(update.message.text.strip())
+        await update.message.reply_text("Цена клиенту (CNY):")
+        return Z_PRICE
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи целое число для количества:")
+        return Z_QTY
 
 async def z_get_price(update, context):
-    uid = str(update.effective_user.id); orders[uid]['current']['price'] = float(update.message.text)
-    await update.message.reply_text("Закупка (CNY):"); return Z_PURCHASE
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['current']['price'] = float(update.message.text.replace(',', '.').strip())
+        await update.message.reply_text("Закупка (CNY):")
+        return Z_PURCHASE
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число (например 5.5):")
+        return Z_PRICE
 
 async def z_get_purchase(update, context):
-    uid = str(update.effective_user.id); orders[uid]['current']['purchase'] = float(update.message.text)
-    await update.message.reply_text("Доставка до склада (CNY):"); return Z_DELIVERY
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['current']['purchase'] = float(update.message.text.replace(',', '.').strip())
+        await update.message.reply_text("Доставка до склада (CNY):")
+        return Z_DELIVERY
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число:")
+        return Z_PURCHASE
 
 async def z_get_delivery(update, context):
-    uid = str(update.effective_user.id); orders[uid]['current']['delivery_factory'] = float(update.message.text)
-    await update.message.reply_text("Размеры (Д Ш В) или '-':"); return Z_DIMS
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['current']['delivery_factory'] = float(update.message.text.replace(',', '.').strip())
+        await update.message.reply_text("Размеры (Д Ш В) или '-':")
+        return Z_DIMS
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число:")
+        return Z_DELIVERY
 
 async def z_get_dims(update, context):
     uid = str(update.effective_user.id); text = update.message.text.strip()
-    orders[uid]['current']['dims'] = (0,0,0) if text == '-' else tuple(map(float, text.split()))
+    if text == '-':
+        orders[uid]['current']['dims'] = (0,0,0)
+    else:
+        try:
+            orders[uid]['current']['dims'] = tuple(map(float, text.replace(',', '.').split()))
+        except Exception:
+            await update.message.reply_text("❌ Неверный формат. Введи 3 числа через пробел (например: 15 10 5) или '-':")
+            return Z_DIMS
+            
     orders[uid]['items'].append(orders[uid]['current'])
     await update.message.reply_text("Ещё товар?", reply_markup=InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Да", callback_data='z_more_yes'), InlineKeyboardButton("❌ Нет", callback_data='z_more_no')]
@@ -359,17 +406,30 @@ async def z_get_dims(update, context):
 
 async def z_more_cb(update, context):
     query = update.callback_query; await query.answer()
-    if query.data == 'z_more_yes': await query.edit_message_text("Название товара:"); return Z_NAME
-    await query.edit_message_text("Курс клиенту:"); return Z_CLIENT_RATE
+    if query.data == 'z_more_yes': 
+        await query.edit_message_text("Название товара:")
+        return Z_NAME
+    await query.edit_message_text("Курс клиенту:")
+    return Z_CLIENT_RATE
 
 async def z_client_rate(update, context):
-    uid = str(update.effective_user.id); orders[uid]['client_rate'] = float(update.message.text)
-    await update.message.reply_text("Реальный курс:"); return Z_REAL_RATE
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['client_rate'] = float(update.message.text.replace(',', '.').strip())
+        await update.message.reply_text("Реальный курс:")
+        return Z_REAL_RATE
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число:")
+        return Z_CLIENT_RATE
 
 async def z_real_rate(update, context):
     uid = str(update.effective_user.id)
-    orders[uid]['real_rate'] = float(update.message.text)
-    
+    try:
+        orders[uid]['real_rate'] = float(update.message.text.replace(',', '.').strip())
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число:")
+        return Z_REAL_RATE
+        
     items = orders[uid]['items']
     client_rate = orders[uid]['client_rate']
     real_rate = orders[uid]['real_rate']
@@ -512,7 +572,7 @@ async def ff_main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ff_box_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     try:
-        box_price = float(update.message.text)
+        box_price = float(update.message.text.replace(',', '.'))
         orders[uid]['custom_box_price'] = box_price
         
         bundles = orders[uid].get('ff_bundles', [])
@@ -528,8 +588,8 @@ async def ff_box_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(f"Коробок: {total_boxes}. Стоимость коробок: {total_boxes * box_price}¥\n\nНапиши стоимость сборки/работы для ВСЕХ одиночных товаров суммарно (¥) или 0:")
         return F_SUMMARY
-    except:
-        await update.message.reply_text("Число! Цена за 1 коробку:")
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число (например 12.5):")
         return F_BOX_PRICE
 
 # -- Логика одиночных --
@@ -566,7 +626,7 @@ async def show_single_item(update_or_query, uid):
 async def ff_single_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     try:
-        dims = tuple(map(float, update.message.text.split()))
+        dims = tuple(map(float, update.message.text.replace(',', '.').split()))
         if len(dims) != 3: raise ValueError
         
         idx = orders[uid]['ff_single_index']
@@ -577,7 +637,7 @@ async def ff_single_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         query_mock = type('obj', (object,), {'message': update.message, 'reply_text': update.message.reply_text})
         return await show_single_item(query_mock, uid)
-    except:
+    except Exception:
         await update.message.reply_text("❌ Неверный формат. Введи 3 числа (например: 15 10 5):")
         return F_SINGLE_DIMS
 
@@ -601,9 +661,9 @@ async def ff_single_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ff_single_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     try:
-        price = float(update.message.text)
-    except:
-        await update.message.reply_text("Введи число:")
+        price = float(update.message.text.replace(',', '.'))
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число:")
         return F_SINGLE_ITEMS
         
     idx = orders[uid]['ff_single_index']
@@ -654,12 +714,11 @@ async def ff_bundle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ff_bundle_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     try:
-        orders[uid]['ff_b_dims'] = tuple(map(float, update.message.text.split()))
-    except:
+        orders[uid]['ff_b_dims'] = tuple(map(float, update.message.text.replace(',', '.').split()))
+    except Exception:
         await update.message.reply_text("❌ Ошибка формата. Введи 3 числа (например: 16 12 5):")
         return F_BUNDLE_DIMS
         
-    # === АВТОРАСЧЕТ КОЛИЧЕСТВА НАБОРОВ ===
     selected_indices = orders[uid].get('ff_bundle_selected', set())
     items = orders[uid]['items']
     
@@ -691,24 +750,28 @@ async def ff_bundle_package_cb(update: Update, context: ContextTypes.DEFAULT_TYP
 async def ff_bundle_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     try:
-        orders[uid]['ff_b_pkg'] = {'name': 'Ручной', 'price': float(update.message.text)}
-    except:
-        await update.message.reply_text("Введи число:")
+        orders[uid]['ff_b_pkg'] = {'name': 'Ручной', 'price': float(update.message.text.replace(',', '.'))}
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число:")
         return F_BUNDLE_PACKAGE
     await update.message.reply_text("Кол-во термобумаги на 1 набор (листов) или 'auto':"); return F_BUNDLE_THERMAL
 
 async def ff_bundle_thermal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id); txt = update.message.text.strip().lower()
-    sheets = 1 if txt == 'auto' else float(txt)
+    try:
+        sheets = 1.0 if txt == 'auto' else float(txt.replace(',', '.'))
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число или 'auto':")
+        return F_BUNDLE_THERMAL
     orders[uid]['ff_b_thermal'] = sheets * 0.016
     await update.message.reply_text("Цена сборки ЗА 1 НАБОР (¥):"); return F_BUNDLE_WORK
 
 async def ff_bundle_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     try:
-        work = float(update.message.text)
-    except:
-        await update.message.reply_text("Введи число:")
+        work = float(update.message.text.replace(',', '.'))
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число:")
         return F_BUNDLE_WORK
     
     qty = orders[uid]['ff_b_qty']
@@ -733,9 +796,9 @@ async def ff_bundle_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ff_summary_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     try:
-        single_work = float(update.message.text)
-    except:
-        await update.message.reply_text("Введи число:")
+        single_work = float(update.message.text.replace(',', '.'))
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число:")
         return F_SUMMARY
     
     bundles = orders[uid].get('ff_bundles', [])
@@ -772,9 +835,9 @@ async def d_warehouse_cb(update, context):
 async def d_boxes(update, context):
     uid = str(update.effective_user.id)
     try:
-        boxes = int(update.message.text)
-    except:
-        await update.message.reply_text("Введи число:")
+        boxes = int(update.message.text.strip())
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи целое число:")
         return D_BOXES
         
     city = orders[uid]['current_wh']
@@ -795,10 +858,17 @@ async def d_more_cb(update, context):
     if query.data == 'd_more_yes':
         keyboard = [[InlineKeyboardButton(c, callback_data=f'd_wh_{c}')] for c in TARIFFS.keys()]
         await query.edit_message_text("Склад РФ:", reply_markup=InlineKeyboardMarkup(keyboard)); return D_WAREHOUSE
-    await query.edit_message_text("Курс ₽→драм:"); return D_RUB_RATE
+    await query.edit_message_text("Курс ₽→драм:")
+    return D_RUB_RATE
 
 async def d_rub_rate(update, context):
-    uid = str(update.effective_user.id); orders[uid]['rub_rate'] = float(update.message.text)
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['rub_rate'] = float(update.message.text.replace(',', '.'))
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число:")
+        return D_RUB_RATE
+        
     total_rub = sum(w['cost'] for w in orders[uid]['warehouses']) + 7000 # 7000 - IOB pickup
     orders[uid]['fillx_total'] = total_rub
     
@@ -861,7 +931,7 @@ def main():
         fallbacks=[CommandHandler('cancel', lambda u,c: ConversationHandler.END)]
     ))
 
-    logger.info("Бот запущен. Версия v46 (Auto-Bundle & Full Build)")
+    logger.info("Бот запущен. Версия v47 (Crash Fixed, Auto-Name Normalizer)")
     app.run_polling()
 
 if __name__ == '__main__': main()
