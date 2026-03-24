@@ -1113,7 +1113,7 @@ async def z_commission_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ======== /FF ========
 
-F_SELECT_ORDER, F_MAIN_MENU, F_SINGLE_ITEMS, F_BUNDLE_CREATE, F_BUNDLE_DIMS, F_BUNDLE_PACKAGE, F_BUNDLE_THERMAL, F_BUNDLE_WORK, F_SUMMARY = range(9)
+F_SELECT_ORDER, F_MAIN_MENU, F_SINGLE_ITEMS, F_BUNDLE_CREATE, F_BUNDLE_DIMS, F_BUNDLE_PACKAGE, F_PACKAGES, F_PACKAGE_PRICE, F_WORK, F_THERMAL, F_BUNDLE_WORK, F_SUMMARY = range(12)
 
 async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
