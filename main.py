@@ -139,7 +139,9 @@ async def get_client_orders_from_notion(client_name):
             # Case-insensitive сравнение (strip для удаления лишних пробелов)
             if order_client and order_client.lower().strip() == client_name_lower:
                 created = page.get('created_time', '')[:10]
-                items_text = props.get('Описание товара', {}).get('rich_text', [{}])[0].get('text', {}).get('content', '')
+                # Безопасное получение описания (может быть пустым)
+                rich_text = props.get('Описание товара', {}).get('rich_text', [])
+                items_text = rich_text[0].get('text', {}).get('content', '') if rich_text else ''
                 items_list = []
                 seen_names = set()  # Для дедупликации
                 for item_str in items_text.split(';'):
@@ -181,8 +183,9 @@ async def get_client_orders_from_notion(client_name):
                             seen_names.add(name)
                             items_list.append({'name': name, 'qty': qty})
                 
-                # Получаем размеры из Notion
-                dimensions_str = props.get('Размеры (Д×Ш×В)', {}).get('rich_text', [{}])[0].get('text', {}).get('content', '')
+                # Получаем размеры из Notion (безопасно)
+                dims_rich = props.get('Размеры (Д×Ш×В)', {}).get('rich_text', [])
+                dimensions_str = dims_rich[0].get('text', {}).get('content', '') if dims_rich else ''
                 dims = (0, 0, 0)
                 if dimensions_str and '×' in dimensions_str:
                     try:
@@ -199,7 +202,7 @@ async def get_client_orders_from_notion(client_name):
                 
                 order = {
                     'id': page['id'],
-                    'code': props.get('Код заказа', {}).get('title', [{}])[0].get('text', {}).get('content', ''),
+                    'code': props.get('Код заказа', {}).get('title', [{}])[0].get('text', {}).get('content', '') if props.get('Код заказа', {}).get('title') else '',
                     'date': created,
                     'client_rate': props.get('Курс клиенту', {}).get('number'),
                     'real_rate': props.get('Курс реальный', {}).get('number'),
