@@ -127,15 +127,17 @@ async def get_client_orders_from_notion(client_name):
         )
         
         orders_list = []
-        client_name_lower = client_name.lower()
+        client_name_lower = client_name.lower().strip()
+        all_clients = []  # ДЕБАГ: список всех клиентов
         
         for page in res.get('results', []):
             props = page['properties']
             # Получаем имя клиента из заказа
             order_client = props.get('Клиент', {}).get('select', {}).get('name', '')
+            all_clients.append(order_client)  # ДЕБАГ
             
-            # Case-insensitive сравнение
-            if order_client and order_client.lower() == client_name_lower:
+            # Case-insensitive сравнение (strip для удаления лишних пробелов)
+            if order_client and order_client.lower().strip() == client_name_lower:
                 created = page.get('created_time', '')[:10]
                 items_text = props.get('Описание товара', {}).get('rich_text', [{}])[0].get('text', {}).get('content', '')
                 items_list = []
@@ -207,6 +209,12 @@ async def get_client_orders_from_notion(client_name):
                     'total': props.get('К ОПЛАТЕ (AMD)', {}).get('number') or props.get('Прибыль (AMD)', {}).get('number'),
                 }
                 orders_list.append(order)
+        
+        # ДЕБАГ: логируем что нашли
+        logger.info(f"Поиск клиента: '{client_name}' (всего заказов в Notion: {len(res.get('results', []))})")
+        logger.info(f"Найдено заказов: {len(orders_list)}")
+        logger.info(f"Все клиенты в базе: {list(set(all_clients))[:20]}")  # Первые 20 уникальных
+        
         return orders_list, None
     except Exception as e:
         error_str = str(e)
@@ -1151,6 +1159,34 @@ async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await start_ff(update, context, uid)
             return F_PACKAGES
+        
+        # Если нет заказов — показываем какие клиенты есть для дебага
+        if not client_orders:
+            # Получаем список всех клиентов для проверки
+            all_clients = []
+            try:
+                res = notion.databases.query(
+                    database_id=NOTION_DATABASE_ID,
+                    page_size=100
+                )
+                for page in res.get('results', []):
+                    client = page['properties'].get('Клиент', {}).get('select', {}).get('name', '')
+                    if client:
+                        all_clients.append(client)
+                unique_clients = list(set(all_clients))[:10]  # Первые 10 уникальных
+            except:
+                unique_clients = []
+            
+            clients_list = '\n'.join([f'• {c}' for c in unique_clients]) if unique_clients else 'Не удалось получить список'
+            
+            await update.message.reply_text(
+                f'Клиент: <b>{client_name}</b>\n'
+                f'В базе заказов не найдено.\n\n'
+                f'Клиенты в базе:\n{clients_list}\n\n'
+                f'Проверь имя или выполни /zakaz {client_name}',
+                parse_mode='HTML'
+            )
+            return ConversationHandler.END
         
         # Инициализируем сессию
         orders[uid] = {
