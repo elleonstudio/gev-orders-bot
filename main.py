@@ -416,7 +416,7 @@ async def z_real_rate(update, context):
     return ConversationHandler.END
 
 # --- /FF ПОЛНАЯ КОМАНДА ---
-F_MAIN_MENU, F_SINGLE_ITEMS, F_BUNDLE_CREATE, F_BUNDLE_NAME, F_BUNDLE_DIMS, F_BUNDLE_PACKAGE, F_BUNDLE_THERMAL, F_BUNDLE_WORK, F_BOX_PRICE, F_SUMMARY = range(20, 30)
+F_MAIN_MENU, F_SINGLE_ITEMS, F_SINGLE_DIMS, F_BUNDLE_CREATE, F_BUNDLE_NAME, F_BUNDLE_DIMS, F_BUNDLE_PACKAGE, F_BUNDLE_THERMAL, F_BUNDLE_WORK, F_BOX_PRICE, F_SUMMARY = range(20, 31)
 
 async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -462,7 +462,9 @@ async def ff_main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Нет товаров для одиночных", show_alert=True); return F_MAIN_MENU
         orders[uid]['ff_single_available'] = available
         orders[uid]['ff_single_index'] = 0
-        return await show_single_item(query, uid)
+        
+        query_mock = type('obj', (object,), {'edit_message_text': query.edit_message_text})
+        return await show_single_item(query_mock, uid)
         
     elif query.data == 'ff_mode_bundle':
         available = [(idx, item) for idx, item in enumerate(orders[uid]['items']) if idx not in orders[uid]['ff_items_in_bundles']]
@@ -470,10 +472,11 @@ async def ff_main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Нет товаров для набора", show_alert=True); return F_MAIN_MENU
         orders[uid]['ff_bundle_selected'] = set()
         orders[uid]['ff_bundle_available'] = available
-        return await show_bundle_item_selection(query, uid)
+        
+        query_mock = type('obj', (object,), {'edit_message_text': query.edit_message_text})
+        return await show_bundle_item_selection(query_mock, uid)
         
     elif query.data == 'ff_mode_continue':
-        # Спрашиваем цену за коробку для всего заказа
         await query.edit_message_text("📦 <b>Стоимость коробки</b>\n\nНапиши цену за 1 коробку 60x40x40 (¥):", parse_mode='HTML')
         return F_BOX_PRICE
 
@@ -483,7 +486,6 @@ async def ff_box_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         box_price = float(update.message.text)
         orders[uid]['custom_box_price'] = box_price
         
-        # Считаем количество коробок
         bundles = orders[uid].get('ff_bundles', [])
         single_items_list = [s['item'] for s in orders[uid].get('ff_single_items', [])]
         
@@ -500,13 +502,23 @@ async def ff_box_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return F_BOX_PRICE
 
 # -- Логика одиночных --
-async def show_single_item(query, uid):
+async def show_single_item(update_or_query, uid):
     idx = orders[uid]['ff_single_index']
     available = orders[uid]['ff_single_available']
-    if idx >= len(available): return await show_ff_main_menu(query, uid)
+    if idx >= len(available): 
+        return await show_ff_main_menu(update_or_query, uid)
     
     item_idx, item = available[idx]
     l, w, h = item.get('dims', (0,0,0))
+    
+    # Запрос размеров если их нет
+    if (l, w, h) == (0, 0, 0):
+        msg = f"⚠️ У товара <b>{item['name']}</b> нет размеров!\n\nВведи размеры 1 шт (Д Ш В в см):\nНапример: 15 10 5"
+        if hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(msg, parse_mode='HTML')
+        else:
+            await update_or_query.message.reply_text(msg, parse_mode='HTML')
+        return F_SINGLE_DIMS
     
     packages = await get_packages_from_notion()
     orders[uid]['ff_available_packages'] = packages
@@ -514,8 +526,31 @@ async def show_single_item(query, uid):
     msg = f"📦 Товар {idx+1}/{len(available)}: <b>{item['name']}</b>\nРазмеры: {l}x{w}x{h} | Кол-во: {item['qty']}\n\nВыбери пакет:"
     keyboard = [[InlineKeyboardButton(f"📦 {p['name']} — {p['price']}¥", callback_data=f'ff_s_pkg_{i}')] for i, p in enumerate(packages)]
     keyboard.append([InlineKeyboardButton("💰 Своя цена", callback_data='ff_s_custom')])
-    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+    
+    if hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+    else:
+        await update_or_query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
     return F_SINGLE_ITEMS
+
+async def ff_single_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    try:
+        dims = tuple(map(float, update.message.text.split()))
+        if len(dims) != 3: raise ValueError
+        
+        idx = orders[uid]['ff_single_index']
+        item_idx, item = orders[uid]['ff_single_available'][idx]
+        
+        # Обновляем размеры
+        orders[uid]['ff_single_available'][idx][1]['dims'] = dims
+        orders[uid]['items'][item_idx]['dims'] = dims
+        
+        query_mock = type('obj', (object,), {'message': update.message, 'reply_text': update.message.reply_text})
+        return await show_single_item(query_mock, uid)
+    except:
+        await update.message.reply_text("❌ Неверный формат. Введи 3 числа (например: 15 10 5):")
+        return F_SINGLE_DIMS
 
 async def ff_single_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
@@ -530,7 +565,9 @@ async def ff_single_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     orders[uid]['ff_single_items'].append({'item': item, 'pkg': pkg, 'total': pkg['price'] * item['qty'], 'qty': item['qty']})
     orders[uid]['ff_items_in_bundles'].add(item_idx)
     orders[uid]['ff_single_index'] += 1
-    return await show_single_item(query, uid)
+    
+    query_mock = type('obj', (object,), {'edit_message_text': query.edit_message_text})
+    return await show_single_item(query_mock, uid)
 
 async def ff_single_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -542,12 +579,11 @@ async def ff_single_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     orders[uid]['ff_items_in_bundles'].add(item_idx)
     orders[uid]['ff_single_index'] += 1
     
-    # Эмулируем query для возврата в меню
     query_mock = type('obj', (object,), {'edit_message_text': update.message.reply_text})
     return await show_single_item(query_mock, uid)
 
 # -- Логика наборов --
-async def show_bundle_item_selection(query, uid):
+async def show_bundle_item_selection(update_or_query, uid):
     available = orders[uid]['ff_bundle_available']
     selected = orders[uid]['ff_bundle_selected']
     msg = "Выбери товары для набора:\n\n"
@@ -557,7 +593,11 @@ async def show_bundle_item_selection(query, uid):
         mark = "☑️" if item_idx in selected else "☐"
         keyboard.append([InlineKeyboardButton(f"{mark} {item['name']} x {item['qty']}", callback_data=f'ff_b_sel_{item_idx}')])
     keyboard.append([InlineKeyboardButton("✅ Далее", callback_data='ff_b_next')])
-    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    if hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update_or_query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
     return F_BUNDLE_CREATE
 
 async def ff_bundle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -566,7 +606,9 @@ async def ff_bundle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         i_idx = int(query.data.replace('ff_b_sel_', ''))
         if i_idx in orders[uid]['ff_bundle_selected']: orders[uid]['ff_bundle_selected'].remove(i_idx)
         else: orders[uid]['ff_bundle_selected'].add(i_idx)
-        return await show_bundle_item_selection(query, uid)
+        
+        query_mock = type('obj', (object,), {'edit_message_text': query.edit_message_text})
+        return await show_bundle_item_selection(query_mock, uid)
     elif query.data == 'ff_b_next':
         if not orders[uid]['ff_bundle_selected']: return F_BUNDLE_CREATE
         await query.edit_message_text("Введи имя набора:"); return F_BUNDLE_NAME
@@ -622,7 +664,6 @@ async def ff_bundle_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     orders[uid]['ff_items_in_bundles'].update(orders[uid]['ff_bundle_selected'])
     
-    # Эмулируем query
     query_mock = type('obj', (object,), {'edit_message_text': update.message.reply_text})
     return await show_ff_main_menu(query_mock, uid)
 
@@ -724,6 +765,7 @@ def main():
         states={
             F_MAIN_MENU: [CallbackQueryHandler(ff_main_menu_cb)],
             F_SINGLE_ITEMS: [CallbackQueryHandler(ff_single_cb), MessageHandler(filters.TEXT & ~filters.COMMAND, ff_single_price)],
+            F_SINGLE_DIMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_single_dims)],
             F_BUNDLE_CREATE: [CallbackQueryHandler(ff_bundle_cb)],
             F_BUNDLE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_bundle_name)],
             F_BUNDLE_DIMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_bundle_dims)],
@@ -747,7 +789,7 @@ def main():
         fallbacks=[CommandHandler('cancel', lambda u,c: ConversationHandler.END)]
     ))
 
-    logger.info("Бот успешно запущен. Версия v41 (Complete Architecture)")
+    logger.info("Бот успешно запущен. Версия v42 (Final Complete Architecture)")
     app.run_polling()
 
 if __name__ == '__main__': main()
