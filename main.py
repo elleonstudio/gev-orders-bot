@@ -1462,21 +1462,27 @@ async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
     
     # Без аргументов — работаем как раньше (нужен предыдущий /zakaz)
+    logger.info(f"cmd_ff: uid={uid}, has_orders={uid in orders}, items_count={len(orders.get(uid, {}).get('items', []))}")
+    
     if uid not in orders or not orders[uid].get('items'):
         msg = 'Сначала выполни /zakaz [имя клиента]\n\nИли сразу: /ff [имя клиента]'
         if hasattr(update, 'message') and update.message:
             await update.message.reply_text(msg)
         elif hasattr(update, 'callback_query') and update.callback_query:
             await update.callback_query.edit_message_text(msg)
+        logger.warning(f"cmd_ff: no data for uid={uid}")
         return ConversationHandler.END
     
     result = await show_order_selection_ff(update, context, uid)
+    logger.info(f"cmd_ff: show_order_selection_ff returned {result}")
     if result is None:
         return ConversationHandler.END
     return result
 
 async def show_order_selection_ff(update: Update, context: ContextTypes.DEFAULT_TYPE, uid):
     """Показывает выбор заказа для FF"""
+    logger.info(f"show_order_selection_ff: uid={uid}, orders keys={list(orders.get(uid, {}).keys())}")
+    
     if uid not in orders:
         msg = 'Сначала выполни /zakaz [имя клиента]'
         if hasattr(update, 'message') and update.message:
@@ -1490,10 +1496,14 @@ async def show_order_selection_ff(update: Update, context: ContextTypes.DEFAULT_
     
     client_orders = orders[uid].get('all_client_orders', [])
     client = orders[uid].get('client', 'Неизвестно')
+    items = orders[uid].get('items', [])
+    
+    logger.info(f"show_order_selection_ff: client={client}, items={len(items)}, client_orders={len(client_orders)}")
     
     if not client_orders:
         # Нет заказов в базе — работаем с текущим
-        if orders[uid].get('items'):
+        if items:
+            logger.info(f"show_order_selection_ff: showing main menu with {len(items)} items")
             return await show_ff_main_menu(update, context, uid)
         msg = 'Нет данных для расчёта. Сначала выполни /zakaz'
         if hasattr(update, 'message') and update.message:
@@ -2676,13 +2686,17 @@ async def d_crating_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 async def save_to_notion(update, context, uid):
+    logger.info(f"save_to_notion: uid={uid}, starting save")
     try:
         existing_fields = await get_notion_fields()
         existing_names = [f.split(' (')[0] for f in existing_fields]
+        logger.info(f"save_to_notion: found {len(existing_names)} fields in Notion")
         
         data = orders[uid]
         client = data['client']
         items = data['items']
+        
+        logger.info(f"save_to_notion: client={client}, items={len(items)}")
         
         total_qty = sum(i['qty'] for i in items)
         total_purchase = sum(i['purchase'] * i['qty'] for i in items)
@@ -2760,12 +2774,14 @@ async def save_to_notion(update, context, uid):
                 result = notion.pages.update(page_id=existing_page_id, properties=properties)
                 page_id = existing_page_id
                 action = "Обновлено"
+                logger.info(f"save_to_notion: updated page {page_id}")
             else:
                 # Создаём новую запись
                 result = notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=properties)
                 page_id = result.get('id', '')
                 orders[uid]['notion_page_id'] = page_id  # Сохраняем ID для следующих обновлений
                 action = "Сохранено"
+                logger.info(f"save_to_notion: created page {page_id}")
             
             # Собираем URL вручную, так как API может не возвращать его
             page_url = f"https://notion.so/{page_id.replace('-', '')}"
@@ -3072,78 +3088,83 @@ async def paste_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     data = query.data
     uid = str(update.effective_user.id)
     
+    logger.info(f"PASTE callback: uid={uid}, data={data}")
+    
     if uid not in orders or orders[uid].get('type') != 'paste':
+        logger.warning(f"PASTE callback: no data for uid={uid}")
         await query.edit_message_text('❌ Данные устарели. Выполни /paste снова.')
         return
     
     items = orders[uid]['items']
+    total_cny = orders[uid].get('total_cny', 0)
     
-    if data.startswith('paste_save_'):
-        # Сохраняем в Notion
-        # Генерируем код заказа
-        order_code = f"PASTE-{datetime.now().strftime('%y%m%d-%H%M')}"
-        # Сохраняем в Notion
-        # Генерируем код заказа
-        order_code = f"PASTE-{datetime.now().strftime('%y%m%d-%H%M')}"
+    try:
+        if data.startswith('paste_save_'):
+            logger.info(f"PASTE save: uid={uid}, items={len(items)}")
+            # Сохраняем в Notion через основную функцию
+            has_access, _ = await check_notion_access()
+            if has_access:
+                try:
+                    notion_url = await save_to_notion(update, context, uid)
+                    if notion_url:
+                        await query.edit_message_text(
+                            f'✅ Сохранено в Notion:\n{notion_url}',
+                            parse_mode='HTML'
+                        )
+                    else:
+                        await query.edit_message_text(
+                            f'⚠️ Не удалось сохранить в Notion\n\n'
+                            f'💰 Итого: {total_cny:.1f}¥'
+                        )
+                except Exception as e:
+                    logger.error(f"Ошибка сохранения: {e}")
+                    await query.edit_message_text(
+                        f'⚠️ Ошибка сохранения: {str(e)[:100]}\n\n'
+                        f'💰 Итого: {total_cny:.1f}¥'
+                    )
+            else:
+                await query.edit_message_text('❌ Notion не настроен')
         
-        # Формируем текст для Notion
-        items_text = '\n'.join([
-            f"• {i['name']}: {i['qty']} шт × {i['price']}¥ = {i['total']:.1f}¥"
-            for i in items
-        ])
+        elif data.startswith('paste_ff_'):
+            logger.info(f"PASTE ff: uid={uid}, items={len(items)}")
+            # Конвертируем в формат /ff
+            orders[uid]['type'] = 'ff'
+            orders[uid]['ff_bundles'] = []
+            orders[uid]['ff_single_items'] = []
+            orders[uid]['ff_items_in_bundles'] = set()
+            
+            # Преобразуем items в формат с dims
+            for item in items:
+                item['dims'] = item.get('dims', (0, 0, 0))
+                item['dimensions'] = item.get('dimensions', '')
+                item['is_bundle'] = False
+                item['bundle_name'] = None
+            
+            logger.info(f"PASTE ff: converted {len(items)} items, calling cmd_ff")
+            await query.edit_message_text('📦 Перехожу к расчёту FF...')
+            
+            # Вызываем cmd_ff напрямую — она проверит orders[uid] и покажет меню
+            result = await cmd_ff(update, context)
+            logger.info(f"PASTE ff: cmd_ff returned {result}")
+            return result
         
-        notion_data = {
-            'order_code': order_code,
-            'client': 'Paste',
-            'items_text': items_text,
-            'total_cny': total,
-            'status': 'Новый'
-        }
-        
-        url = await save_order_to_notion(notion_data)
-        
-        if url:
-            await query.edit_message_text(
-                f'✅ Сохранено в Notion\n\n'
-                f'📋 {order_code}\n'
-                f'💰 Итого: {total:.1f}¥\n\n'
-                f'<a href="{url}">Открыть в Notion</a>',
-                parse_mode='HTML',
-                disable_web_page_preview=True
-            )
-        else:
-            await query.edit_message_text(
-                f'⚠️ Не удалось сохранить в Notion\n\n'
-                f'📋 {order_code}\n'
-                f'💰 Итого: {total:.1f}¥'
-            )
-    
-    elif data.startswith('paste_ff_'):
-        # Конвертируем в формат /ff
-        orders[uid]['type'] = 'ff'
-        orders[uid]['client'] = 'Paste'
-        orders[uid]['ff_bundles'] = []
-        orders[uid]['ff_single_items'] = []
-        orders[uid]['ff_items_in_bundles'] = set()
-        
-        # Преобразуем items в формат с dims
-        for item in items:
-            item['dims'] = (0, 0, 0)
-            item['dimensions'] = ''
-            item['is_bundle'] = False
-            item['bundle_name'] = None
-        
-        await query.edit_message_text('📦 Перехожу к расчёту FF...')
-        await show_ff_main_menu(update, context, uid)
-    
-    elif data.startswith('paste_dostavka_'):
-        # Конвертируем в формат /dostavka
-        orders[uid]['type'] = 'dostavka'
-        orders[uid]['client'] = 'Paste'
-        
-        for item in items:
-            item['dims'] = (0, 0, 0)
-            item['dimensions'] = ''
+        elif data.startswith('paste_dostavka_'):
+            logger.info(f"PASTE dostavka: uid={uid}")
+            # Конвертируем в формат /dostavka
+            orders[uid]['type'] = 'dostavka'
+            
+            for item in items:
+                item['dims'] = item.get('dims', (0, 0, 0))
+                item['dimensions'] = item.get('dimensions', '')
+            
+            await query.edit_message_text('🚚 Перехожу к расчёту доставки...')
+            # TODO: запустить dostavka flow
+            return
+            
+    except Exception as e:
+        logger.error(f"Ошибка в paste_callback_handler: {e}")
+        logger.error(traceback.format_exc())
+        await query.edit_message_text(f'❌ Ошибка: {str(e)[:200]}')
         
         await query.edit_message_text('🚚 Перехожу к расчёту доставки...')
         # Вызываем dostavka (нужно добавить соответствующую функцию)
