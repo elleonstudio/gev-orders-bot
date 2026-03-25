@@ -76,29 +76,22 @@ def optimize_boxes_with_weight(items):
 async def create_excel_invoice(uid):
     data = orders[uid]
     items_data = []
-    
     for i, item in enumerate(data['items'], 1):
         delivery = item.get('delivery_factory', 0)
-        total_item_cny = (item['price'] * item['qty']) + delivery
         items_data.append({
-            "№": i,
-            "Название товара": item['name'],
-            "Кол-во (шт)": item['qty'],
-            "Цена (¥)": item['price'],
-            "Логистика (¥)": delivery,
-            "Итого (¥)": total_item_cny
+            "№": i, "Название товара": item['name'], "Кол-во (шт)": item['qty'],
+            "Цена (¥)": item['price'], "Логистика (¥)": delivery, "Итого (¥)": (item['price'] * item['qty']) + delivery
         })
         
-    items_data.append({"№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "", "Логистика (¥)": "", "Итого (¥)": ""})
-    items_data.append({"№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "", "Логистика (¥)": "SUBTOTAL:", "Итого (¥)": f"{data.get('total_cny_netto', 0):.1f} ¥"})
-    
-    fee_label = "Комиссия (Мин. 10000 AMD):" if data.get('rule_applied') else "Комиссия (3%):"
-    items_data.append({"№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "", "Логистика (¥)": fee_label, "Итого (¥)": f"{data.get('actual_comm_cny', 0):.1f} ¥"})
-    items_data.append({"№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "", "Логистика (¥)": "ИТОГО К ОПЛАТЕ:", "Итого (¥)": f"{data.get('final_total_amd', 0):,} AMD"})
+    items_data.extend([
+        {"№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "", "Логистика (¥)": "", "Итого (¥)": ""},
+        {"№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "", "Логистика (¥)": "SUBTOTAL:", "Итого (¥)": f"{data.get('total_cny_netto', 0):.1f} ¥"},
+        {"№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "", "Логистика (¥)": "Комиссия (Мин. 10000 AMD):" if data.get('rule_applied') else "Комиссия (3%):", "Итого (¥)": f"{data.get('actual_comm_cny', 0):.1f} ¥"},
+        {"№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "", "Логистика (¥)": "ИТОГО К ОПЛАТЕ:", "Итого (¥)": f"{data.get('final_total_amd', 0):,} AMD"}
+    ])
     
     df = pd.DataFrame(items_data)
     output = io.BytesIO()
-    
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Invoice')
         worksheet = writer.sheets['Invoice']
@@ -107,148 +100,109 @@ async def create_excel_invoice(uid):
         worksheet.set_column('C:C', 12)
         worksheet.set_column('D:E', 15)
         worksheet.set_column('F:F', 20)
-        
     output.seek(0)
     return output
 
-# ======== NOTION АУДИТ ========
+# ======== NOTION API ========
+async def get_packages_from_notion():
+    if not notion or not PACKAGES_DATABASE_ID: return []
+    try:
+        res = notion.databases.query(database_id=PACKAGES_DATABASE_ID)
+        packages = []
+        for page in res.get('results', []):
+            props = page['properties']
+            title_prop = props.get('Название', {}).get('title', [])
+            name = title_prop[0].get('text', {}).get('content', '') if title_prop else ''
+            price = props.get('Цена', {}).get('number') or 0
+            if name and price > 0: packages.append({'name': name, 'price': price})
+        return packages
+    except: return []
+
 async def get_client_orders_from_notion(client_name):
     if not notion or not NOTION_DATABASE_ID: return None, "Notion не настроен"
     try:
         res = notion.databases.query(database_id=NOTION_DATABASE_ID, sorts=[{"timestamp": "created_time", "direction": "descending"}], page_size=100)
         client_norm = normalize_client_name(client_name).lower()
-        filtered = []
-        
-        for p in res.get('results', []):
-            tag = p['properties'].get('Клиент', {}).get('select', {})
-            if tag and normalize_client_name(tag.get('name', '')).lower() == client_norm:
-                filtered.append(p)
-        
+        filtered = [p for p in res.get('results', []) if p['properties'].get('Клиент', {}).get('select', {}) and normalize_client_name(p['properties']['Клиент']['select'].get('name', '')).lower() == client_norm]
         if not filtered: return [], None
         return [{'id': p['id'], 'date': p.get('created_time', '')[:10]} for p in filtered[:5]], None
     except Exception as e: return None, str(e)
 
-# ======== NOTION SAVE ========
 async def save_to_notion(uid):
     if not notion: return None
     try:
         data = orders[uid]
-        client = data['client']
-        total_qty = sum(i['qty'] for i in data['items'])
-        
         properties = {
-            "Код заказа": {"title": [{"text": {"content": get_code(client)}}]},
-            "Клиент": {"select": {"name": client}},
-            "Количество": {"number": float(total_qty)},
+            "Код заказа": {"title": [{"text": {"content": get_code(data['client'])}}]},
+            "Клиент": {"select": {"name": data['client']}},
+            "Количество": {"number": float(sum(i['qty'] for i in data['items']))},
             " К ОПЛАТЕ (AMD)": {"number": float(data['final_total_amd'])},
             "Статус": {"select": {"name": "Новый"}},
             "Date": {"date": {"start": datetime.now().strftime('%Y-%m-%d')}}
         }
-        
         if 'ff_total_yuan' in data: properties["ИТОГО (CNY)"] = {"number": float(data['ff_total_yuan'])}
 
         page_id = data.get('notion_page_id')
-        if page_id: 
-            res = notion.pages.update(page_id=page_id, properties=properties)
+        if page_id: res = notion.pages.update(page_id=page_id, properties=properties)
         else:
             res = notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=properties)
             orders[uid]['notion_page_id'] = res['id']
-            
         return f"https://notion.so/{res['id'].replace('-', '')}"
-    except Exception as e:
-        logger.error(f"Notion Error: {e}")
-        return None
+    except: return None
 
 # ======== ПАРСЕР /PASTE ========
 def parse_paste_text(text):
     data = {'client': 'Unknown', 'items': [], 'client_rate': 58.0, 'real_rate': 55.0}
     current_item = None
-    lines = text.split('\n')
-    
-    for line in lines:
+    for line in text.split('\n'):
         l = line.strip().lower()
         if not l: continue
-        
-        if 'клиент:' in l:
-            data['client'] = normalize_client_name(line.split(':', 1)[1])
+        if 'клиент:' in l: data['client'] = normalize_client_name(line.split(':', 1)[1])
         elif 'товар' in l:
             if current_item: data['items'].append(current_item)
             current_item = {'name': 'Товар', 'qty': 0, 'price': 0.0, 'purchase': 0.0, 'delivery_factory': 0.0, 'dims': (0,0,0), 'weight': 0.0}
         elif 'название:' in l: current_item['name'] = line.split(':', 1)[1].strip().title()
-        elif 'количество:' in l:
-            nums = re.findall(r'\d+', l)
-            if nums: current_item['qty'] = int(nums[0])
-        elif 'цена клиенту:' in l:
-            nums = re.findall(r'\d+\.?\d*', l.replace(',', '.'))
-            if nums: current_item['price'] = float(nums[0])
-        elif 'закупка:' in l:
-            nums = re.findall(r'\d+\.?\d*', l.replace(',', '.'))
-            if nums: current_item['purchase'] = float(nums[0])
-        elif 'доставка:' in l:
-            nums = re.findall(r'\d+\.?\d*', l.replace(',', '.'))
-            if nums: current_item['delivery_factory'] = float(nums[0])
+        elif 'количество:' in l: current_item['qty'] = int(re.findall(r'\d+', l)[0]) if re.findall(r'\d+', l) else 0
+        elif 'цена клиенту:' in l: current_item['price'] = float(re.findall(r'\d+\.?\d*', l.replace(',', '.'))[0]) if re.findall(r'\d+\.?\d*', l.replace(',', '.')) else 0.0
+        elif 'закупка:' in l: current_item['purchase'] = float(re.findall(r'\d+\.?\d*', l.replace(',', '.'))[0]) if re.findall(r'\d+\.?\d*', l.replace(',', '.')) else 0.0
+        elif 'доставка:' in l: current_item['delivery_factory'] = float(re.findall(r'\d+\.?\d*', l.replace(',', '.'))[0]) if re.findall(r'\d+\.?\d*', l.replace(',', '.')) else 0.0
         elif 'размеры:' in l:
             nums = re.findall(r'\d+\.?\d*', l.replace(',', '.'))
             if len(nums) >= 3:
                 current_item['dims'] = (float(nums[0]), float(nums[1]), float(nums[2]))
                 if len(nums) >= 4: current_item['weight'] = float(nums[3])
-        elif 'курс клиенту:' in l:
-            nums = re.findall(r'\d+\.?\d*', l.replace(',', '.'))
-            if nums: data['client_rate'] = float(nums[0])
-        elif 'мой курс:' in l:
-            nums = re.findall(r'\d+\.?\d*', l.replace(',', '.'))
-            if nums: data['real_rate'] = float(nums[0])
-
+        elif 'курс клиенту:' in l: data['client_rate'] = float(re.findall(r'\d+\.?\d*', l.replace(',', '.'))[0]) if re.findall(r'\d+\.?\d*', l.replace(',', '.')) else 58.0
+        elif 'мой курс:' in l: data['real_rate'] = float(re.findall(r'\d+\.?\d*', l.replace(',', '.'))[0]) if re.findall(r'\d+\.?\d*', l.replace(',', '.')) else 55.0
     if current_item: data['items'].append(current_item)
     return data
 
-# ======== COMMANDS ========
 async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     text = update.message.text.replace('/paste', '').strip()
     if not text: return
 
     data = parse_paste_text(text)
-    if not data['items']:
-        await update.message.reply_text("❌ Ошибка: товары не найдены.")
-        return
+    if not data['items']: return await update.message.reply_text("❌ Ошибка: товары не найдены.")
 
     subtotal_cny = sum((i['price'] * i['qty']) + i['delivery_factory'] for i in data['items'])
     comm_amd_3pct = (subtotal_cny * 0.03) * data['client_rate']
     
-    rule_applied = False
-    if comm_amd_3pct < 10000:
-        actual_comm_amd = 10000
-        actual_comm_cny = 10000 / data['client_rate']
-        rule_applied = True
-    else:
-        actual_comm_amd = int(comm_amd_3pct)
-        actual_comm_cny = subtotal_cny * 0.03
+    rule_applied = comm_amd_3pct < 10000
+    actual_comm_amd = 10000 if rule_applied else int(comm_amd_3pct)
+    actual_comm_cny = 10000 / data['client_rate'] if rule_applied else subtotal_cny * 0.03
 
     final_total_amd = int((subtotal_cny * data['client_rate']) + actual_comm_amd)
     
     orders[uid] = data
-    orders[uid].update({
-        'final_total_amd': final_total_amd, 
-        'total_cny_netto': subtotal_cny, 
-        'rule_applied': rule_applied, 
-        'actual_comm_cny': actual_comm_cny,
-        'ff_boxes_qty': 0 # По умолчанию коробок 0, пока не сделан /ff
-    })
+    orders[uid].update({'final_total_amd': final_total_amd, 'total_cny_netto': subtotal_cny, 'rule_applied': rule_applied, 'actual_comm_cny': actual_comm_cny, 'ff_boxes_qty': 0})
 
-    # === АУДИТ ===
-    audit = []
-    if rule_applied: audit.append(f"• Применено правило 10 000 AMD (3% было {int(comm_amd_3pct)} AMD)")
+    audit = [f"• Применено правило 10 000 AMD (3% было {int(comm_amd_3pct)} AMD)"] if rule_applied else []
     missing = [i['name'] for i in data['items'] if i['dims'] == (0,0,0)]
     if missing: audit.append(f"• У <b>{', '.join(missing)}</b> нет размеров. Спрошу в /ff.")
     if audit: await update.message.reply_text("⚠️ <b>Аудит расчета:</b>\n" + "\n".join(audit), parse_mode='HTML')
 
-    # === ИНВОЙС КЛИЕНТУ ===
-    inv_lines = ""
-    for i in data['items']:
-        total_line = (i['price'] * i['qty']) + i['delivery_factory']
-        inv_lines += f"• {i['name']} — {i['qty']} шт\n{i['qty']} × {i['price']} + {i['delivery_factory']} = {total_line:.1f}¥\n"
-
+    inv_lines = "".join([f"• {i['name']} — {i['qty']} шт\n{i['qty']} × {i['price']} + {i['delivery_factory']} = {(i['price'] * i['qty']) + i['delivery_factory']:.1f}¥\n" for i in data['items']])
+    
     msg_client = f"""<b>COMMERCIAL INVOICE: {data['client'].upper()}</b>
 📅 Date: {datetime.now().strftime('%d.%m.%Y')}
 
@@ -267,7 +221,6 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg_client, parse_mode='HTML')
 
-    # === ВНУТРЕННИЙ ЧЕК (ДЛЯ ТЕБЯ) ===
     purchase_cny = sum(i.get('purchase', 0) * i['qty'] for i in data['items'])
     total_delivery_cny = sum(i.get('delivery_factory', 0) for i in data['items'])
     real_expenses_amd = int((purchase_cny + total_delivery_cny) * data['real_rate'])
@@ -286,179 +239,232 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {profit_amd:,} AMD</b>"""
 
-    # Проверка Notion и выдача 3-х кнопок
     client_orders, _ = await get_client_orders_from_notion(data['client'])
-    keyboard = [
-        [InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')],
-        [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')]
-    ]
+    keyboard = [[InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')], [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')]]
     
     if client_orders:
         orders[uid]['existing_notion_page_id'] = client_orders[0]['id']
-        last_date = client_orders[0].get('date', 'неизвестно')
-        msg_admin += f"\n\n⚠️ <b>Клиент найден в базе!</b> (Заказ от: {last_date})"
-        keyboard.append([InlineKeyboardButton("🔄 Обновить старый заказ", callback_data='paste_update')])
-        keyboard.append([InlineKeyboardButton("➕ Сохранить как НОВЫЙ", callback_data='paste_new')])
+        msg_admin += f"\n\n⚠️ <b>Клиент найден в базе!</b> (Заказ от: {client_orders[0].get('date')})"
+        keyboard.append([InlineKeyboardButton("🔄 Обновить старый", callback_data='paste_update'), InlineKeyboardButton("➕ Создать НОВЫЙ", callback_data='paste_new')])
     else:
         keyboard.append([InlineKeyboardButton("💾 Сохранить в Notion", callback_data='paste_new')])
 
     await update.message.reply_text(msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ======== ОБРАБОТЧИК КНОПОК ========
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
-    
     if query.data == 'gen_excel':
         try:
             file_stream = await create_excel_invoice(uid)
             await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(file_stream, filename=f"Invoice_{orders[uid]['client']}.xlsx"))
-        except Exception as e: 
-            logger.error(e)
-            await query.message.reply_text("❌ Ошибка Excel. Проверь требования.")
-            
+        except: await query.message.reply_text("❌ Ошибка Excel.")
     elif query.data == 'export_airtable':
         data = orders.get(uid)
-        if not data: return
-        
-        export_text = f"""AIRTABLE_EXPORT_START
-Invoice_ID: {get_code(data['client'])}
-Date: {datetime.now().strftime('%d.%m.%Y')}
-Sum_Client_CNY: {data.get('total_cny_netto', 0)}
-Real_Purchase_CNY: {sum(i.get('purchase', 0) * i.get('qty', 0) for i in data.get('items', []))}
-Client_Rate: {data.get('client_rate', 58.0)}
-Real_Rate: {data.get('real_rate', 55.0)}
-Total_Qty: {sum(i.get('qty', 0) for i in data.get('items', []))}
-China_Logistics_CNY: {sum(i.get('delivery_factory', 0) for i in data.get('items', []))}
-FF_Boxes_Qty: {data.get('ff_boxes_qty', 0)}
-AIRTABLE_EXPORT_END"""
-        
+        export_text = f"AIRTABLE_EXPORT_START\nInvoice_ID: {get_code(data['client'])}\nDate: {datetime.now().strftime('%d.%m.%Y')}\nSum_Client_CNY: {data.get('total_cny_netto', 0)}\nReal_Purchase_CNY: {sum(i.get('purchase', 0) * i.get('qty', 0) for i in data.get('items', []))}\nClient_Rate: {data.get('client_rate', 58.0)}\nReal_Rate: {data.get('real_rate', 55.0)}\nTotal_Qty: {sum(i.get('qty', 0) for i in data.get('items', []))}\nChina_Logistics_CNY: {sum(i.get('delivery_factory', 0) for i in data.get('items', []))}\nFF_Boxes_Qty: {data.get('ff_boxes_qty', 0)}\nAIRTABLE_EXPORT_END"
         await query.message.reply_text(f"<code>{export_text}</code>", parse_mode='HTML')
-        
     elif query.data in ['paste_new', 'paste_update', 'paste_save_direct']:
-        if query.data == 'paste_update':
-            orders[uid]['notion_page_id'] = orders[uid].get('existing_notion_page_id')
-            action = "Обновлен старый заказ"
-        elif query.data == 'paste_new':
-            orders[uid]['notion_page_id'] = None
-            action = "Создан новый заказ"
-        else:
-            action = "Данные обновлены" # Для кнопок из /ff и /dostavka
-            
+        if query.data == 'paste_update': orders[uid]['notion_page_id'] = orders[uid].get('existing_notion_page_id')
+        elif query.data == 'paste_new': orders[uid]['notion_page_id'] = None
         url = await save_to_notion(uid)
-        
-        try:
-            await query.edit_message_text(f"{query.message.text}\n\n✅ {action}:\n{url}" if url else f"{query.message.text}\n\n❌ Ошибка Notion")
-        except:
-            await query.message.reply_text(f"✅ {action}:\n{url}" if url else "❌ Ошибка Notion")
+        try: await query.edit_message_text(f"{query.message.text}\n\n✅ Сохранено:\n{url}" if url else f"{query.message.text}\n\n❌ Ошибка Notion")
+        except: await query.message.reply_text(f"✅ Сохранено:\n{url}" if url else "❌ Ошибка Notion")
 
-# ======== ФУНКЦИИ FF ========
-async def cmd_ff_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ======== FF MENU И НАБОРЫ ========
+F_MAIN_MENU, F_SINGLE_DIMS, F_BUNDLE_CREATE, F_BUNDLE_NAME, F_BUNDLE_DIMS, F_BUNDLE_PACKAGE, F_BUNDLE_THERMAL, F_BUNDLE_WORK, F_SUMMARY = range(20, 29)
+
+async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    if uid not in orders: return
+    if uid not in orders or not orders[uid].get('items'): 
+        await update.message.reply_text("Сначала /paste"); return ConversationHandler.END
     
-    items_to_pack = orders[uid]['items']
-    boxes = optimize_boxes_with_weight(items_to_pack)
+    orders[uid]['ff_bundles'] = orders[uid].get('ff_bundles', [])
+    orders[uid]['ff_single_items'] = orders[uid].get('ff_single_items', [])
+    orders[uid]['ff_items_in_bundles'] = orders[uid].get('ff_items_in_bundles', set())
+    
+    return await show_ff_main_menu(update, uid)
+
+async def show_ff_main_menu(update_or_query, uid):
+    items = orders[uid]['items']
+    items_in_bundles = orders[uid]['ff_items_in_bundles']
+    bundles = orders[uid]['ff_bundles']
+    
+    msg = "📦 <b>FF Китай — Выбор режима</b>\n\n<b>Товары:</b>\n"
+    for idx, item in enumerate(items):
+        msg += f"{'☑️ <s>' if idx in items_in_bundles else '☐ '}{item['name']}{'</s>' if idx in items_in_bundles else ''}\n"
+    
+    msg += f"\n<b>Создано наборов:</b> {len(bundles)}\n"
+    for b in bundles: msg += f"  📦 {b.get('name', 'Без имени')} (Кол-во: {b.get('qty', 1)})\n"
+    
+    keyboard = [
+        [InlineKeyboardButton("📦 Собрать набор", callback_data='ff_mode_bundle')],
+        [InlineKeyboardButton("✅ Завершить FF →", callback_data='ff_mode_continue')],
+    ]
+    if hasattr(update_or_query, 'edit_message_text'):
+        await update_or_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+    else:
+        await update_or_query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+    return F_MAIN_MENU
+
+async def ff_main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
+    
+    if query.data == 'ff_back_menu': return await show_ff_main_menu(query, uid)
+        
+    elif query.data == 'ff_mode_bundle':
+        available = [(idx, item) for idx, item in enumerate(orders[uid]['items']) if idx not in orders[uid]['ff_items_in_bundles']]
+        if not available: await query.answer("Нет товаров для набора", show_alert=True); return F_MAIN_MENU
+        orders[uid]['ff_bundle_selected'] = set()
+        orders[uid]['ff_bundle_available'] = available
+        
+        query_mock = type('obj', (object,), {'edit_message_text': query.edit_message_text})
+        return await show_bundle_item_selection(query_mock, uid)
+        
+    elif query.data == 'ff_mode_continue':
+        unpacked_indices = [idx for idx, item in enumerate(orders[uid]['items']) if idx not in orders[uid]['ff_items_in_bundles']]
+        missing = [orders[uid]['items'][idx]['name'] for idx in unpacked_indices if orders[uid]['items'][idx].get('dims', (0,0,0)) == (0,0,0)]
+        
+        if missing:
+            await query.edit_message_text(f"⚠️ У товара <b>{missing[0]}</b> нет размеров! Введи размеры (Д Ш В Вес):", parse_mode='HTML')
+            orders[uid]['ff_missing_idx'] = unpacked_indices[0]
+            return F_SINGLE_DIMS
+            
+        await query.edit_message_text("Напиши стоимость сборки/работы для ВСЕХ оставшихся одиночных товаров суммарно (¥) или 0:")
+        return F_SUMMARY
+
+async def ff_single_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    try:
+        nums = tuple(map(float, update.message.text.replace(',', '.').split()))
+        idx = orders[uid]['ff_missing_idx']
+        if len(nums) >= 3:
+            orders[uid]['items'][idx]['dims'] = (nums[0], nums[1], nums[2])
+            if len(nums) >= 4: orders[uid]['items'][idx]['weight'] = nums[3]
+        query_mock = type('obj', (object,), {'message': update.message, 'reply_text': update.message.reply_text})
+        return await show_ff_main_menu(query_mock, uid)
+    except:
+        await update.message.reply_text("❌ Введи 4 числа (Д Ш В Вес):")
+        return F_SINGLE_DIMS
+
+async def show_bundle_item_selection(update_or_query, uid):
+    available = orders[uid]['ff_bundle_available']
+    selected = orders[uid]['ff_bundle_selected']
+    keyboard = [[InlineKeyboardButton(f"{'☑️' if item_idx in selected else '☐'} {item['name']} x {item['qty']}", callback_data=f'ff_b_sel_{item_idx}')] for idx, (item_idx, item) in enumerate(available)]
+    keyboard.append([InlineKeyboardButton("✅ Далее", callback_data='ff_b_next')])
+    await update_or_query.edit_message_text("Выбери товары для набора:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return F_BUNDLE_CREATE
+
+async def ff_bundle_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
+    if query.data.startswith('ff_b_sel_'):
+        i_idx = int(query.data.replace('ff_b_sel_', ''))
+        if i_idx in orders[uid]['ff_bundle_selected']: orders[uid]['ff_bundle_selected'].remove(i_idx)
+        else: orders[uid]['ff_bundle_selected'].add(i_idx)
+        query_mock = type('obj', (object,), {'edit_message_text': query.edit_message_text})
+        return await show_bundle_item_selection(query_mock, uid)
+    elif query.data == 'ff_b_next':
+        if not orders[uid]['ff_bundle_selected']: return F_BUNDLE_CREATE
+        await query.edit_message_text("Введи имя набора:"); return F_BUNDLE_NAME
+
+async def ff_bundle_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id); orders[uid]['ff_b_name'] = update.message.text.strip()
+    await update.message.reply_text("Размеры ОДНОГО готового набора (Д Ш В Вес):"); return F_BUNDLE_DIMS
+
+async def ff_bundle_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    try:
+        nums = tuple(map(float, update.message.text.replace(',', '.').split()))
+        orders[uid]['ff_b_dims'] = (nums[0], nums[1], nums[2])
+        orders[uid]['ff_b_weight'] = nums[3] if len(nums) >= 4 else 0.0
+    except:
+        await update.message.reply_text("❌ Ошибка. Введи 4 числа (например: 16 12 5 0.3):")
+        return F_BUNDLE_DIMS
+        
+    selected_indices = orders[uid].get('ff_bundle_selected', set())
+    bundle_qty = min(orders[uid]['items'][i].get('qty', 1) for i in selected_indices) if selected_indices else 1
+    orders[uid]['ff_b_qty'] = bundle_qty
+    
+    await update.message.reply_text(f"🤖 Бот рассчитал: получается <b>{bundle_qty} наборов</b>.", parse_mode='HTML')
+    
+    packages = await get_packages_from_notion()
+    orders[uid]['ff_available_packages'] = packages
+    keyboard = [[InlineKeyboardButton(f"📦 {p['name']} — {p['price']}¥", callback_data=f'ff_b_pkg_{i}')] for i, p in enumerate(packages)]
+    keyboard.append([InlineKeyboardButton("💰 Своя цена", callback_data='ff_b_custom')])
+    await update.message.reply_text("Выбери пакет:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return F_BUNDLE_PACKAGE
+
+async def ff_bundle_package_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
+    if query.data == 'ff_b_custom':
+        await query.edit_message_text("Цена пакета (¥):"); return F_BUNDLE_PACKAGE
+    pkg_idx = int(query.data.replace('ff_b_pkg_', ''))
+    orders[uid]['ff_b_pkg'] = orders[uid]['ff_available_packages'][pkg_idx]
+    await query.edit_message_text("Цена сборки ЗА 1 НАБОР (¥):"); return F_BUNDLE_WORK
+
+async def ff_bundle_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    try: orders[uid]['ff_b_pkg'] = {'name': 'Ручной', 'price': float(update.message.text.replace(',', '.'))}
+    except: await update.message.reply_text("Введи число:"); return F_BUNDLE_PACKAGE
+    await update.message.reply_text("Цена сборки ЗА 1 НАБОР (¥):"); return F_BUNDLE_WORK
+
+async def ff_bundle_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    try: work = float(update.message.text.replace(',', '.'))
+    except: await update.message.reply_text("Введи число:"); return F_BUNDLE_WORK
+    
+    orders[uid]['ff_bundles'].append({
+        'name': orders[uid]['ff_b_name'], 'dims': orders[uid]['ff_b_dims'], 'weight': orders[uid].get('ff_b_weight', 0),
+        'qty': orders[uid]['ff_b_qty'], 'pkg': orders[uid]['ff_b_pkg'], 'work_price': work,
+        'item_indices': list(orders[uid]['ff_bundle_selected'])
+    })
+    orders[uid]['ff_items_in_bundles'].update(orders[uid]['ff_bundle_selected'])
+    
+    query_mock = type('obj', (object,), {'edit_message_text': update.message.reply_text})
+    return await show_ff_main_menu(query_mock, uid)
+
+async def ff_summary_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    try: single_work = float(update.message.text.replace(',', '.'))
+    except: await update.message.reply_text("Введи число:"); return F_SUMMARY
+    
+    # Считаем коробки (одиночные + наборы)
+    unpacked_items = [item for idx, item in enumerate(orders[uid]['items']) if idx not in orders[uid]['ff_items_in_bundles']]
+    bundle_items = [{'name': b['name'], 'dims': b['dims'], 'weight': b['weight'], 'qty': b['qty']} for b in orders[uid]['ff_bundles']]
+    
+    boxes = optimize_boxes_with_weight(unpacked_items + bundle_items)
     total_boxes = len(boxes)
     total_weight = sum(b['cur_weight'] for b in boxes)
     cost = total_boxes * BOX_PRICE_CNY
     
-    orders[uid]['ff_total_yuan'] = cost
-    orders[uid]['ff_boxes_qty'] = total_boxes # Сохраняем для Airtable
+    orders[uid]['ff_total_yuan'] = cost + single_work + sum((b['pkg']['price'] + b['work_price']) * b['qty'] for b in orders[uid]['ff_bundles'])
+    orders[uid]['ff_boxes_qty'] = total_boxes
     
-    res = f"📦 <b>Результат FF (Лимит 30кг):</b>\n\nМест: {total_boxes} шт\nОбщий вес: {total_weight:.2f} кг\nСтоимость коробок: {cost:.2f}¥ (по {BOX_PRICE_CNY}¥)"
+    res = f"📦 <b>Результат FF (Лимит 30кг):</b>\n\nМест: {total_boxes} шт\nОбщий вес: {total_weight:.2f} кг\nСтоимость коробок: {cost:.2f}¥ (по {BOX_PRICE_CNY}¥)\nОбщий итог FF: {orders[uid]['ff_total_yuan']:.2f}¥"
     
-    # 3 Кнопки
-    kb = [
-        [InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')],
-        [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')],
-        [InlineKeyboardButton("💾 Обновить Notion", callback_data='paste_save_direct')]
-    ]
+    kb = [[InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')], [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')], [InlineKeyboardButton("💾 Обновить Notion", callback_data='paste_save_direct')]]
     await update.message.reply_text(res, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
-
-# ======== ФУНКЦИИ DOSTAVKA ========
-D_WAREHOUSE, D_BOXES, D_MORE_WH, D_RUB_RATE = range(30, 34)
-
-async def cmd_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    if uid not in orders: await update.message.reply_text("Сначала /zakaz"); return ConversationHandler.END
-    orders[uid]['warehouses'] = []
-    keyboard = [[InlineKeyboardButton(c, callback_data=f'd_wh_{c}')] for c in TARIFFS.keys()]
-    await update.message.reply_text("Выбери склад РФ:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return D_WAREHOUSE
-
-async def d_warehouse_cb(update, context):
-    query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
-    orders[uid]['current_wh'] = query.data.replace('d_wh_', '')
-    await query.edit_message_text("Количество коробок:"); return D_BOXES
-
-async def d_boxes(update, context):
-    uid = str(update.effective_user.id)
-    try:
-        boxes = int(update.message.text.strip())
-    except Exception:
-        await update.message.reply_text("❌ Ошибка. Введи целое число:")
-        return D_BOXES
-        
-    city = orders[uid]['current_wh']
-    if city == 'Свой тариф':
-        await update.message.reply_text("Этот склад требует ручного тарифа. Выбери другой через /dostavka"); return ConversationHandler.END
-        
-    cost = TARIFFS[city] * boxes
-    orders[uid]['warehouses'].append({'city': city, 'boxes': boxes, 'cost': cost})
-    
-    await update.message.reply_text("Еще склад?", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("Да", callback_data='d_more_yes'), InlineKeyboardButton("Нет", callback_data='d_more_no')]
-    ]))
-    return D_MORE_WH
-
-async def d_more_cb(update, context):
-    query = update.callback_query; await query.answer()
-    if query.data == 'd_more_yes':
-        keyboard = [[InlineKeyboardButton(c, callback_data=f'd_wh_{c}')] for c in TARIFFS.keys()]
-        await query.edit_message_text("Склад РФ:", reply_markup=InlineKeyboardMarkup(keyboard)); return D_WAREHOUSE
-    await query.edit_message_text("Курс ₽→драм:")
-    return D_RUB_RATE
-
-async def d_rub_rate(update, context):
-    uid = str(update.effective_user.id)
-    try:
-        orders[uid]['rub_rate'] = float(update.message.text.replace(',', '.'))
-    except Exception:
-        await update.message.reply_text("❌ Ошибка. Введи число:")
-        return D_RUB_RATE
-        
-    total_rub = sum(w['cost'] for w in orders[uid]['warehouses']) + 7000 # 7000 - IOB pickup
-    orders[uid]['fillx_total'] = total_rub
-    
-    msg = f"✅ <b>Доставка FILLX:</b> {total_rub}₽\nМест: {sum(w['boxes'] for w in orders[uid]['warehouses'])} шт."
-    
-    # 3 Кнопки
-    kb = [
-        [InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')],
-        [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')],
-        [InlineKeyboardButton("💾 Обновить Notion", callback_data='paste_save_direct')]
-    ]
-    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
     return ConversationHandler.END
 
 # ======== MAIN ========
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler('paste', cmd_paste))
-    app.add_handler(CommandHandler('ff_done', cmd_ff_done))
     
     app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler('dostavka', cmd_dostavka)],
+        entry_points=[CommandHandler('ff', cmd_ff)],
         states={
-            D_WAREHOUSE: [CallbackQueryHandler(d_warehouse_cb)],
-            D_BOXES: [MessageHandler(filters.TEXT & ~filters.COMMAND, d_boxes)],
-            D_MORE_WH: [CallbackQueryHandler(d_more_cb)],
-            D_RUB_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, d_rub_rate)]
+            F_MAIN_MENU: [CallbackQueryHandler(ff_main_menu_cb)],
+            F_SINGLE_DIMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_single_dims)],
+            F_BUNDLE_CREATE: [CallbackQueryHandler(ff_bundle_cb)],
+            F_BUNDLE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_bundle_name)],
+            F_BUNDLE_DIMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_bundle_dims)],
+            F_BUNDLE_PACKAGE: [CallbackQueryHandler(ff_bundle_package_cb), MessageHandler(filters.TEXT & ~filters.COMMAND, ff_bundle_price)],
+            F_BUNDLE_WORK: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_bundle_work)],
+            F_SUMMARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_summary_work)],
         },
         fallbacks=[CommandHandler('cancel', lambda u,c: ConversationHandler.END)]
     ))
     
-    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(CallbackQueryHandler(export_handler))
     app.run_polling()
 
 if __name__ == '__main__': main()
