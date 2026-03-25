@@ -68,10 +68,12 @@ def optimize_boxes_with_weight(items):
             })
     return boxes
 
-# ======== EXCEL ГЕНЕРАТОР (xlsxwriter) ========
+# ======== EXCEL ГЕНЕРАТОР ========
 async def create_excel_invoice(uid):
     data = orders[uid]
     items_data = []
+    
+    # 1. Заполняем товары
     for i, item in enumerate(data['items'], 1):
         delivery = item.get('delivery_factory', 0)
         total_item_cny = (item['price'] * item['qty']) + delivery
@@ -83,12 +85,47 @@ async def create_excel_invoice(uid):
             "Логистика (¥)": delivery,
             "Итого (¥)": total_item_cny
         })
+        
+    # 2. Добавляем пустую строку для визуального отступа
+    items_data.append({
+        "№": "", "Название товара": "", "Кол-во (шт)": "", 
+        "Цена (¥)": "", "Логистика (¥)": "", "Итого (¥)": ""
+    })
+    
+    # 3. Добавляем Итоги (Subtotal, Комиссия, Финал)
+    items_data.append({
+        "№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "",
+        "Логистика (¥)": "SUBTOTAL:", 
+        "Итого (¥)": f"{data.get('total_cny_netto', 0):.1f} ¥"
+    })
+    
+    fee_label = "Комиссия (Мин. 10000 AMD):" if data.get('rule_applied') else "Комиссия (3%):"
+    items_data.append({
+        "№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "",
+        "Логистика (¥)": fee_label, 
+        "Итого (¥)": f"{data.get('actual_comm_cny', 0):.1f} ¥"
+    })
+    
+    items_data.append({
+        "№": "", "Название товара": "", "Кол-во (шт)": "", "Цена (¥)": "",
+        "Логистика (¥)": "ИТОГО К ОПЛАТЕ:", 
+        "Итого (¥)": f"{data.get('final_total_amd', 0):,} AMD"
+    })
     
     df = pd.DataFrame(items_data)
     output = io.BytesIO()
-    # Используем xlsxwriter для надежности в Railway
+    
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Invoice')
+        
+        # 4. Настраиваем красоту (ширину колонок)
+        worksheet = writer.sheets['Invoice']
+        worksheet.set_column('A:A', 5)   # Колонка №
+        worksheet.set_column('B:B', 35)  # Название товара
+        worksheet.set_column('C:C', 12)  # Кол-во
+        worksheet.set_column('D:E', 15)  # Цена и Логистика
+        worksheet.set_column('F:F', 20)  # Итого
+        
     output.seek(0)
     return output
 
@@ -109,7 +146,6 @@ async def save_to_notion(uid):
             "Date": {"date": {"start": datetime.now().strftime('%Y-%m-%d')}}
         }
         
-        # Если это FF, добавляем стоимость коробок
         if 'ff_total_yuan' in data:
             properties["ИТОГО (CNY)"] = {"number": float(data['ff_total_yuan'])}
 
