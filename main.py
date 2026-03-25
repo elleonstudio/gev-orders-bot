@@ -26,6 +26,12 @@ MAX_BOX_WEIGHT = 30.0  # Лимит веса на одну коробку
 notion = Client(auth=NOTION_TOKEN) if NOTION_TOKEN else None
 orders = {}
 
+TARIFFS = {
+    'Коледино': 350, 'Невинномысск': 1100, 'Электросталь': 400, 'Белые Столбы': 350,
+    'Чашниково': 350, 'Санкт-Петербург': 450, 'Казань': 450, 'Екатеринбург': 700,
+    'Новосибирск': 850, 'Владивосток': 1000, 'Краснодар': 550, 'Свой тариф': 0
+}
+
 # ======== УТИЛИТЫ ========
 def normalize_client_name(name):
     return re.sub(r'\s+', '', name).strip().capitalize()
@@ -222,7 +228,13 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     final_total_amd = int((subtotal_cny * data['client_rate']) + actual_comm_amd)
     
     orders[uid] = data
-    orders[uid].update({'final_total_amd': final_total_amd, 'total_cny_netto': subtotal_cny, 'rule_applied': rule_applied, 'actual_comm_cny': actual_comm_cny})
+    orders[uid].update({
+        'final_total_amd': final_total_amd, 
+        'total_cny_netto': subtotal_cny, 
+        'rule_applied': rule_applied, 
+        'actual_comm_cny': actual_comm_cny,
+        'ff_boxes_qty': 0 # По умолчанию коробок 0, пока не сделан /ff
+    })
 
     # === АУДИТ ===
     audit = []
@@ -274,9 +286,12 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {profit_amd:,} AMD</b>"""
 
-    # Проверка Notion
+    # Проверка Notion и выдача 3-х кнопок
     client_orders, _ = await get_client_orders_from_notion(data['client'])
-    keyboard = [[InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')]]
+    keyboard = [
+        [InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')],
+        [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')]
+    ]
     
     if client_orders:
         orders[uid]['existing_notion_page_id'] = client_orders[0]['id']
@@ -289,8 +304,10 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
+# ======== ОБРАБОТЧИК КНОПОК ========
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
+    
     if query.data == 'gen_excel':
         try:
             file_stream = await create_excel_invoice(uid)
@@ -298,17 +315,37 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e: 
             logger.error(e)
             await query.message.reply_text("❌ Ошибка Excel. Проверь требования.")
-    elif query.data in ['paste_new', 'paste_update']:
+            
+    elif query.data == 'export_airtable':
+        data = orders.get(uid)
+        if not data: return
+        
+        export_text = f"""AIRTABLE_EXPORT_START
+Invoice_ID: {get_code(data['client'])}
+Date: {datetime.now().strftime('%d.%m.%Y')}
+Sum_Client_CNY: {data.get('total_cny_netto', 0)}
+Real_Purchase_CNY: {sum(i.get('purchase', 0) * i.get('qty', 0) for i in data.get('items', []))}
+Client_Rate: {data.get('client_rate', 58.0)}
+Real_Rate: {data.get('real_rate', 55.0)}
+Total_Qty: {sum(i.get('qty', 0) for i in data.get('items', []))}
+China_Logistics_CNY: {sum(i.get('delivery_factory', 0) for i in data.get('items', []))}
+FF_Boxes_Qty: {data.get('ff_boxes_qty', 0)}
+AIRTABLE_EXPORT_END"""
+        
+        await query.message.reply_text(f"<code>{export_text}</code>", parse_mode='HTML')
+        
+    elif query.data in ['paste_new', 'paste_update', 'paste_save_direct']:
         if query.data == 'paste_update':
             orders[uid]['notion_page_id'] = orders[uid].get('existing_notion_page_id')
             action = "Обновлен старый заказ"
-        else:
+        elif query.data == 'paste_new':
             orders[uid]['notion_page_id'] = None
             action = "Создан новый заказ"
+        else:
+            action = "Данные обновлены" # Для кнопок из /ff и /dostavka
             
         url = await save_to_notion(uid)
         
-        # Редактируем сообщение, чтобы убрать кнопки
         try:
             await query.edit_message_text(f"{query.message.text}\n\n✅ {action}:\n{url}" if url else f"{query.message.text}\n\n❌ Ошибка Notion")
         except:
@@ -326,15 +363,101 @@ async def cmd_ff_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cost = total_boxes * BOX_PRICE_CNY
     
     orders[uid]['ff_total_yuan'] = cost
-    await save_to_notion(uid)
+    orders[uid]['ff_boxes_qty'] = total_boxes # Сохраняем для Airtable
     
     res = f"📦 <b>Результат FF (Лимит 30кг):</b>\n\nМест: {total_boxes} шт\nОбщий вес: {total_weight:.2f} кг\nСтоимость коробок: {cost:.2f}¥ (по {BOX_PRICE_CNY}¥)"
-    await update.message.reply_text(res, parse_mode='HTML')
+    
+    # 3 Кнопки
+    kb = [
+        [InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')],
+        [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')],
+        [InlineKeyboardButton("💾 Обновить Notion", callback_data='paste_save_direct')]
+    ]
+    await update.message.reply_text(res, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
 
+# ======== ФУНКЦИИ DOSTAVKA ========
+D_WAREHOUSE, D_BOXES, D_MORE_WH, D_RUB_RATE = range(30, 34)
+
+async def cmd_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if uid not in orders: await update.message.reply_text("Сначала /zakaz"); return ConversationHandler.END
+    orders[uid]['warehouses'] = []
+    keyboard = [[InlineKeyboardButton(c, callback_data=f'd_wh_{c}')] for c in TARIFFS.keys()]
+    await update.message.reply_text("Выбери склад РФ:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return D_WAREHOUSE
+
+async def d_warehouse_cb(update, context):
+    query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
+    orders[uid]['current_wh'] = query.data.replace('d_wh_', '')
+    await query.edit_message_text("Количество коробок:"); return D_BOXES
+
+async def d_boxes(update, context):
+    uid = str(update.effective_user.id)
+    try:
+        boxes = int(update.message.text.strip())
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи целое число:")
+        return D_BOXES
+        
+    city = orders[uid]['current_wh']
+    if city == 'Свой тариф':
+        await update.message.reply_text("Этот склад требует ручного тарифа. Выбери другой через /dostavka"); return ConversationHandler.END
+        
+    cost = TARIFFS[city] * boxes
+    orders[uid]['warehouses'].append({'city': city, 'boxes': boxes, 'cost': cost})
+    
+    await update.message.reply_text("Еще склад?", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("Да", callback_data='d_more_yes'), InlineKeyboardButton("Нет", callback_data='d_more_no')]
+    ]))
+    return D_MORE_WH
+
+async def d_more_cb(update, context):
+    query = update.callback_query; await query.answer()
+    if query.data == 'd_more_yes':
+        keyboard = [[InlineKeyboardButton(c, callback_data=f'd_wh_{c}')] for c in TARIFFS.keys()]
+        await query.edit_message_text("Склад РФ:", reply_markup=InlineKeyboardMarkup(keyboard)); return D_WAREHOUSE
+    await query.edit_message_text("Курс ₽→драм:")
+    return D_RUB_RATE
+
+async def d_rub_rate(update, context):
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['rub_rate'] = float(update.message.text.replace(',', '.'))
+    except Exception:
+        await update.message.reply_text("❌ Ошибка. Введи число:")
+        return D_RUB_RATE
+        
+    total_rub = sum(w['cost'] for w in orders[uid]['warehouses']) + 7000 # 7000 - IOB pickup
+    orders[uid]['fillx_total'] = total_rub
+    
+    msg = f"✅ <b>Доставка FILLX:</b> {total_rub}₽\nМест: {sum(w['boxes'] for w in orders[uid]['warehouses'])} шт."
+    
+    # 3 Кнопки
+    kb = [
+        [InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')],
+        [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')],
+        [InlineKeyboardButton("💾 Обновить Notion", callback_data='paste_save_direct')]
+    ]
+    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+    return ConversationHandler.END
+
+# ======== MAIN ========
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler('paste', cmd_paste))
     app.add_handler(CommandHandler('ff_done', cmd_ff_done))
+    
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler('dostavka', cmd_dostavka)],
+        states={
+            D_WAREHOUSE: [CallbackQueryHandler(d_warehouse_cb)],
+            D_BOXES: [MessageHandler(filters.TEXT & ~filters.COMMAND, d_boxes)],
+            D_MORE_WH: [CallbackQueryHandler(d_more_cb)],
+            D_RUB_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, d_rub_rate)]
+        },
+        fallbacks=[CommandHandler('cancel', lambda u,c: ConversationHandler.END)]
+    ))
+    
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.run_polling()
 
