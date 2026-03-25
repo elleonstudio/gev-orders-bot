@@ -40,7 +40,6 @@ def get_code(client):
     return f"{client.upper()}-{datetime.now().strftime('%y%m%d')}"
 
 def optimize_boxes_with_weight(items):
-    """Алгоритм упаковки 3D + Вес (лимит 30кг)"""
     MAX_L, MAX_W, MAX_H = 60, 40, 40
     boxes = []
     
@@ -71,6 +70,85 @@ def optimize_boxes_with_weight(items):
                 'cur_weight': unit['weight']
             })
     return boxes
+
+# ======== ЕДИНЫЙ ЦЕНТР РАСЧЕТОВ И ВЫВОДА ЧЕКА ========
+async def finalize_order(uid, message_obj):
+    data = orders[uid]
+    
+    # 1. Расчет математики
+    subtotal_cny = sum((i['price'] * i['qty']) + i.get('delivery_factory', 0) for i in data['items'])
+    comm_amd_3pct = (subtotal_cny * 0.03) * data['client_rate']
+    
+    rule_applied = comm_amd_3pct < 10000
+    actual_comm_amd = 10000 if rule_applied else int(comm_amd_3pct)
+    actual_comm_cny = 10000 / data['client_rate'] if rule_applied else subtotal_cny * 0.03
+    final_total_amd = int((subtotal_cny * data['client_rate']) + actual_comm_amd)
+    
+    data.update({
+        'final_total_amd': final_total_amd, 
+        'total_cny_netto': subtotal_cny, 
+        'rule_applied': rule_applied, 
+        'actual_comm_cny': actual_comm_cny, 
+        'ff_boxes_qty': data.get('ff_boxes_qty', 0)
+    })
+
+    # 2. Аудит
+    audit = [f"• Применено правило 10 000 AMD (3% было {int(comm_amd_3pct)} AMD)"] if rule_applied else []
+    missing = [i['name'] for i in data['items'] if i.get('dims', (0,0,0)) == (0,0,0)]
+    if missing: audit.append(f"• У <b>{', '.join(missing)}</b> нет размеров. Спрошу в /ff.")
+    if audit: await message_obj.reply_text("⚠️ <b>Аудит расчета:</b>\n" + "\n".join(audit), parse_mode='HTML')
+
+    # 3. Чек клиенту
+    inv_lines = "".join([f"• {i['name']} — {i['qty']} шт\n{i['qty']} × {i['price']} + {i.get('delivery_factory', 0)} = {(i['price'] * i['qty']) + i.get('delivery_factory', 0):.1f}¥\n" for i in data['items']])
+    
+    msg_client = f"""<b>COMMERCIAL INVOICE: {data['client'].upper()}</b>
+📅 Date: {datetime.now().strftime('%d.%m.%Y')}
+
+<b>1. ТОВАРНАЯ ВЕДОМОСТЬ (Logistics Included)</b>
+{inv_lines}<code>────────────────────────</code>
+<b>SUBTOTAL:</b> {subtotal_cny:.1f}¥
+
+<b>2. КОМИССИЯ И СЕРВИС (Service Fee)</b>
+({'Минимальная 10000 AMD' if rule_applied else '3%'}): {actual_comm_cny:.1f}¥
+
+<b>3. ИТОГОВЫЙ РАСЧЕТ (Convertation)</b>
+• Всего в юанях: {subtotal_cny + actual_comm_cny:.1f}¥
+• Курс: {data['client_rate']}
+
+✅ <b>ИТОГО: {final_total_amd:,} AMD</b>"""
+
+    await message_obj.reply_text(msg_client, parse_mode='HTML')
+
+    # 4. Внутренний чек
+    purchase_cny = sum(i.get('purchase', 0) * i['qty'] for i in data['items'])
+    total_delivery_cny = sum(i.get('delivery_factory', 0) for i in data['items'])
+    real_expenses_amd = int((purchase_cny + total_delivery_cny) * data['real_rate'])
+    profit_amd = final_total_amd - real_expenses_amd
+
+    msg_admin = f"""💼 <b>ВНУТРЕННИЙ РАСЧЕТ: {data['client'].upper()}</b>
+
+<b>РАСХОДЫ (Курс закупа: {data['real_rate']}):</b>
+• Закупка товара: {purchase_cny:.1f}¥
+• Доставка по Китаю: {total_delivery_cny:.1f}¥
+Итого расход: <b>{real_expenses_amd:,} AMD</b>
+
+<b>ДОХОДЫ:</b>
+• Взяли с клиента: <b>{final_total_amd:,} AMD</b>
+• Комиссия в чеке: {actual_comm_amd:,} AMD
+
+💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {profit_amd:,} AMD</b>"""
+
+    client_orders, _ = await get_client_orders_from_notion(data['client'])
+    keyboard = [[InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')], [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')]]
+    
+    if client_orders:
+        orders[uid]['existing_notion_page_id'] = client_orders[0]['id']
+        msg_admin += f"\n\n⚠️ <b>Клиент найден в базе!</b> (Заказ от: {client_orders[0].get('date')})"
+        keyboard.append([InlineKeyboardButton("🔄 Обновить старый", callback_data='paste_update'), InlineKeyboardButton("➕ Создать НОВЫЙ", callback_data='paste_new')])
+    else:
+        keyboard.append([InlineKeyboardButton("💾 Сохранить в Notion", callback_data='paste_new')])
+
+    await message_obj.reply_text(msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 # ======== EXCEL ГЕНЕРАТОР ========
 async def create_excel_invoice(uid):
@@ -108,14 +186,7 @@ async def get_packages_from_notion():
     if not notion or not PACKAGES_DATABASE_ID: return []
     try:
         res = notion.databases.query(database_id=PACKAGES_DATABASE_ID)
-        packages = []
-        for page in res.get('results', []):
-            props = page['properties']
-            title_prop = props.get('Название', {}).get('title', [])
-            name = title_prop[0].get('text', {}).get('content', '') if title_prop else ''
-            price = props.get('Цена', {}).get('number') or 0
-            if name and price > 0: packages.append({'name': name, 'price': price})
-        return packages
+        return [{'name': p['properties'].get('Название', {}).get('title', [{}])[0].get('text', {}).get('content', ''), 'price': p['properties'].get('Цена', {}).get('number', 0)} for p in res.get('results', []) if p['properties'].get('Название', {}).get('title') and p['properties'].get('Цена', {}).get('number', 0) > 0]
     except: return []
 
 async def get_client_orders_from_notion(client_name):
@@ -180,77 +251,109 @@ async def cmd_paste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     text = update.message.text.replace('/paste', '').strip()
     if not text: return
-
     data = parse_paste_text(text)
     if not data['items']: return await update.message.reply_text("❌ Ошибка: товары не найдены.")
-
-    subtotal_cny = sum((i['price'] * i['qty']) + i['delivery_factory'] for i in data['items'])
-    comm_amd_3pct = (subtotal_cny * 0.03) * data['client_rate']
-    
-    rule_applied = comm_amd_3pct < 10000
-    actual_comm_amd = 10000 if rule_applied else int(comm_amd_3pct)
-    actual_comm_cny = 10000 / data['client_rate'] if rule_applied else subtotal_cny * 0.03
-
-    final_total_amd = int((subtotal_cny * data['client_rate']) + actual_comm_amd)
-    
     orders[uid] = data
-    orders[uid].update({'final_total_amd': final_total_amd, 'total_cny_netto': subtotal_cny, 'rule_applied': rule_applied, 'actual_comm_cny': actual_comm_cny, 'ff_boxes_qty': 0})
+    await finalize_order(uid, update.message)
 
-    audit = [f"• Применено правило 10 000 AMD (3% было {int(comm_amd_3pct)} AMD)"] if rule_applied else []
-    missing = [i['name'] for i in data['items'] if i['dims'] == (0,0,0)]
-    if missing: audit.append(f"• У <b>{', '.join(missing)}</b> нет размеров. Спрошу в /ff.")
-    if audit: await update.message.reply_text("⚠️ <b>Аудит расчета:</b>\n" + "\n".join(audit), parse_mode='HTML')
+# ======== РУЧНОЙ ВВОД ЗАКАЗА (/ZAKAZ) ========
+Z_NAME, Z_QTY, Z_PRICE, Z_PURCHASE, Z_DELIVERY, Z_DIMS, Z_MORE, Z_CLIENT_RATE, Z_REAL_RATE = range(40, 49)
 
-    inv_lines = "".join([f"• {i['name']} — {i['qty']} шт\n{i['qty']} × {i['price']} + {i['delivery_factory']} = {(i['price'] * i['qty']) + i['delivery_factory']:.1f}¥\n" for i in data['items']])
+async def cmd_zakaz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if not context.args: 
+        await update.message.reply_text("❌ Напиши имя клиента после команды. Например: /zakaz Zaven8291")
+        return ConversationHandler.END
     
-    msg_client = f"""<b>COMMERCIAL INVOICE: {data['client'].upper()}</b>
-📅 Date: {datetime.now().strftime('%d.%m.%Y')}
+    client = normalize_client_name(' '.join(context.args))
+    orders[uid] = {'client': client, 'items': [], 'client_rate': 58.0, 'real_rate': 55.0}
+    await update.message.reply_text(f"Клиент: {client}\n\nНазвание первого товара:")
+    return Z_NAME
 
-<b>1. ТОВАРНАЯ ВЕДОМОСТЬ (Logistics Included)</b>
-{inv_lines}<code>────────────────────────</code>
-<b>SUBTOTAL:</b> {subtotal_cny:.1f}¥
+async def z_get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    orders[uid]['current'] = {'name': update.message.text.strip().title(), 'dims': (0,0,0), 'weight': 0.0}
+    await update.message.reply_text("Количество:")
+    return Z_QTY
 
-<b>2. КОМИССИЯ И СЕРВИС (Service Fee)</b>
-({'Минимальная 10000 AMD' if rule_applied else '3%'}): {actual_comm_cny:.1f}¥
+async def z_get_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['current']['qty'] = int(re.findall(r'\d+', update.message.text)[0])
+        await update.message.reply_text("Цена клиенту (CNY):")
+        return Z_PRICE
+    except: await update.message.reply_text("❌ Введи целое число:")
 
-<b>3. ИТОГОВЫЙ РАСЧЕТ (Convertation)</b>
-• Всего в юанях: {subtotal_cny + actual_comm_cny:.1f}¥
-• Курс: {data['client_rate']}
+async def z_get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['current']['price'] = float(re.findall(r'\d+\.?\d*', update.message.text.replace(',', '.'))[0])
+        await update.message.reply_text("Закупка (CNY):")
+        return Z_PURCHASE
+    except: await update.message.reply_text("❌ Введи число:")
 
-✅ <b>ИТОГО: {final_total_amd:,} AMD</b>"""
+async def z_get_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['current']['purchase'] = float(re.findall(r'\d+\.?\d*', update.message.text.replace(',', '.'))[0])
+        await update.message.reply_text("Доставка до склада (CNY):")
+        return Z_DELIVERY
+    except: await update.message.reply_text("❌ Введи число:")
 
-    await update.message.reply_text(msg_client, parse_mode='HTML')
+async def z_get_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['current']['delivery_factory'] = float(re.findall(r'\d+\.?\d*', update.message.text.replace(',', '.'))[0])
+        await update.message.reply_text("Размеры (Д Ш В Вес) или '-':")
+        return Z_DIMS
+    except: await update.message.reply_text("❌ Введи число:")
 
-    purchase_cny = sum(i.get('purchase', 0) * i['qty'] for i in data['items'])
-    total_delivery_cny = sum(i.get('delivery_factory', 0) for i in data['items'])
-    real_expenses_amd = int((purchase_cny + total_delivery_cny) * data['real_rate'])
-    profit_amd = final_total_amd - real_expenses_amd
+async def z_get_dims(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    text = update.message.text.strip()
+    if text != '-':
+        try:
+            nums = re.findall(r'\d+\.?\d*', text.replace(',', '.'))
+            if len(nums) >= 3:
+                orders[uid]['current']['dims'] = (float(nums[0]), float(nums[1]), float(nums[2]))
+                if len(nums) >= 4: orders[uid]['current']['weight'] = float(nums[3])
+        except: 
+            await update.message.reply_text("❌ Неверный формат. Введи через пробел или '-':")
+            return Z_DIMS
+            
+    orders[uid]['items'].append(orders[uid]['current'])
+    kb = [[InlineKeyboardButton("✅ Добавить еще", callback_data='z_more_yes')], [InlineKeyboardButton("❌ Готово, к расчету", callback_data='z_more_no')]]
+    await update.message.reply_text("Еще товар?", reply_markup=InlineKeyboardMarkup(kb))
+    return Z_MORE
 
-    msg_admin = f"""💼 <b>ВНУТРЕННИЙ РАСЧЕТ: {data['client'].upper()}</b>
+async def z_more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; await query.answer()
+    if query.data == 'z_more_yes':
+        await query.edit_message_text("Название следующего товара:")
+        return Z_NAME
+    await query.edit_message_text("Укажи курс клиенту (например 58):")
+    return Z_CLIENT_RATE
 
-<b>РАСХОДЫ (Курс закупа: {data['real_rate']}):</b>
-• Закупка товара: {purchase_cny:.1f}¥
-• Доставка по Китаю: {total_delivery_cny:.1f}¥
-Итого расход: <b>{real_expenses_amd:,} AMD</b>
+async def z_client_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['client_rate'] = float(re.findall(r'\d+\.?\d*', update.message.text.replace(',', '.'))[0])
+        await update.message.reply_text("Реальный курс закупа (например 55):")
+        return Z_REAL_RATE
+    except: await update.message.reply_text("❌ Введи число:")
 
-<b>ДОХОДЫ:</b>
-• Взяли с клиента: <b>{final_total_amd:,} AMD</b>
-• Комиссия в чеке: {actual_comm_amd:,} AMD
+async def z_real_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    try:
+        orders[uid]['real_rate'] = float(re.findall(r'\d+\.?\d*', update.message.text.replace(',', '.'))[0])
+    except: 
+        await update.message.reply_text("❌ Введи число:")
+        return Z_REAL_RATE
+        
+    await finalize_order(uid, update.message)
+    return ConversationHandler.END
 
-💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {profit_amd:,} AMD</b>"""
-
-    client_orders, _ = await get_client_orders_from_notion(data['client'])
-    keyboard = [[InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')], [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')]]
-    
-    if client_orders:
-        orders[uid]['existing_notion_page_id'] = client_orders[0]['id']
-        msg_admin += f"\n\n⚠️ <b>Клиент найден в базе!</b> (Заказ от: {client_orders[0].get('date')})"
-        keyboard.append([InlineKeyboardButton("🔄 Обновить старый", callback_data='paste_update'), InlineKeyboardButton("➕ Создать НОВЫЙ", callback_data='paste_new')])
-    else:
-        keyboard.append([InlineKeyboardButton("💾 Сохранить в Notion", callback_data='paste_new')])
-
-    await update.message.reply_text(msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
-
+# ======== ОБЩИЙ ОБРАБОТЧИК КНОПОК ========
 async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
     if query.data == 'gen_excel':
@@ -260,10 +363,7 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: await query.message.reply_text("❌ Ошибка Excel.")
     elif query.data == 'export_airtable':
         data = orders.get(uid)
-        
-        # Убрана генерация даты для Airtable Export! Теперь будет только имя клиента.
         export_text = f"AIRTABLE_EXPORT_START\nInvoice_ID: {data['client']}\nDate: {datetime.now().strftime('%d.%m.%Y')}\nSum_Client_CNY: {data.get('total_cny_netto', 0)}\nReal_Purchase_CNY: {sum(i.get('purchase', 0) * i.get('qty', 0) for i in data.get('items', []))}\nClient_Rate: {data.get('client_rate', 58.0)}\nReal_Rate: {data.get('real_rate', 55.0)}\nTotal_Qty: {sum(i.get('qty', 0) for i in data.get('items', []))}\nChina_Logistics_CNY: {sum(i.get('delivery_factory', 0) for i in data.get('items', []))}\nFF_Boxes_Qty: {data.get('ff_boxes_qty', 0)}\nAIRTABLE_EXPORT_END"
-        
         await query.message.reply_text(f"<code>{export_text}</code>", parse_mode='HTML')
     elif query.data in ['paste_new', 'paste_update', 'paste_save_direct']:
         if query.data == 'paste_update': orders[uid]['notion_page_id'] = orders[uid].get('existing_notion_page_id')
@@ -273,17 +373,14 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: await query.message.reply_text(f"✅ Сохранено:\n{url}" if url else "❌ Ошибка Notion")
 
 # ======== FF MENU И НАБОРЫ ========
-F_MAIN_MENU, F_SINGLE_DIMS, F_BUNDLE_CREATE, F_BUNDLE_NAME, F_BUNDLE_DIMS, F_BUNDLE_PACKAGE, F_BUNDLE_THERMAL, F_BUNDLE_WORK, F_SUMMARY = range(20, 29)
+F_MAIN_MENU, F_SINGLE_DIMS, F_BUNDLE_CREATE, F_BUNDLE_NAME, F_BUNDLE_DIMS, F_BUNDLE_PACKAGE, F_BUNDLE_WORK, F_SUMMARY = range(20, 28)
 
 async def cmd_ff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     if uid not in orders or not orders[uid].get('items'): 
-        await update.message.reply_text("Сначала /paste"); return ConversationHandler.END
-    
+        await update.message.reply_text("Сначала /paste или /zakaz"); return ConversationHandler.END
     orders[uid]['ff_bundles'] = orders[uid].get('ff_bundles', [])
-    orders[uid]['ff_single_items'] = orders[uid].get('ff_single_items', [])
     orders[uid]['ff_items_in_bundles'] = orders[uid].get('ff_items_in_bundles', set())
-    
     return await show_ff_main_menu(update, uid)
 
 async def show_ff_main_menu(update_or_query, uid):
@@ -298,39 +395,28 @@ async def show_ff_main_menu(update_or_query, uid):
     msg += f"\n<b>Создано наборов:</b> {len(bundles)}\n"
     for b in bundles: msg += f"  📦 {b.get('name', 'Без имени')} (Кол-во: {b.get('qty', 1)})\n"
     
-    keyboard = [
-        [InlineKeyboardButton("📦 Собрать набор", callback_data='ff_mode_bundle')],
-        [InlineKeyboardButton("✅ Завершить FF →", callback_data='ff_mode_continue')],
-    ]
-    if hasattr(update_or_query, 'edit_message_text'):
-        await update_or_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
-    else:
-        await update_or_query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+    keyboard = [[InlineKeyboardButton("📦 Собрать набор", callback_data='ff_mode_bundle')], [InlineKeyboardButton("✅ Завершить FF →", callback_data='ff_mode_continue')]]
+    if hasattr(update_or_query, 'edit_message_text'): await update_or_query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+    else: await update_or_query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
     return F_MAIN_MENU
 
 async def ff_main_menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
-    
     if query.data == 'ff_back_menu': return await show_ff_main_menu(query, uid)
-        
     elif query.data == 'ff_mode_bundle':
         available = [(idx, item) for idx, item in enumerate(orders[uid]['items']) if idx not in orders[uid]['ff_items_in_bundles']]
         if not available: await query.answer("Нет товаров для набора", show_alert=True); return F_MAIN_MENU
         orders[uid]['ff_bundle_selected'] = set()
         orders[uid]['ff_bundle_available'] = available
-        
         query_mock = type('obj', (object,), {'edit_message_text': query.edit_message_text})
         return await show_bundle_item_selection(query_mock, uid)
-        
     elif query.data == 'ff_mode_continue':
         unpacked_indices = [idx for idx, item in enumerate(orders[uid]['items']) if idx not in orders[uid]['ff_items_in_bundles']]
         missing = [orders[uid]['items'][idx]['name'] for idx in unpacked_indices if orders[uid]['items'][idx].get('dims', (0,0,0)) == (0,0,0)]
-        
         if missing:
             await query.edit_message_text(f"⚠️ У товара <b>{missing[0]}</b> нет размеров! Введи размеры (Д Ш В Вес):", parse_mode='HTML')
             orders[uid]['ff_missing_idx'] = unpacked_indices[0]
             return F_SINGLE_DIMS
-            
         await query.edit_message_text("Напиши стоимость сборки/работы для ВСЕХ оставшихся одиночных товаров суммарно (¥) или 0:")
         return F_SUMMARY
 
@@ -446,11 +532,83 @@ async def ff_summary_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(res, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
     return ConversationHandler.END
 
+# ======== ФУНКЦИИ DOSTAVKA ========
+D_WAREHOUSE, D_BOXES, D_MORE_WH, D_RUB_RATE = range(30, 34)
+
+async def cmd_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if uid not in orders: await update.message.reply_text("Сначала /zakaz или /paste"); return ConversationHandler.END
+    orders[uid]['warehouses'] = []
+    keyboard = [[InlineKeyboardButton(c, callback_data=f'd_wh_{c}')] for c in TARIFFS.keys()]
+    await update.message.reply_text("Выбери склад РФ:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return D_WAREHOUSE
+
+async def d_warehouse_cb(update, context):
+    query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
+    orders[uid]['current_wh'] = query.data.replace('d_wh_', '')
+    await query.edit_message_text("Количество коробок:"); return D_BOXES
+
+async def d_boxes(update, context):
+    uid = str(update.effective_user.id)
+    try: boxes = int(update.message.text.strip())
+    except: await update.message.reply_text("❌ Введи целое число:"); return D_BOXES
+        
+    city = orders[uid]['current_wh']
+    if city == 'Свой тариф': await update.message.reply_text("Выбери другой через /dostavka"); return ConversationHandler.END
+        
+    cost = TARIFFS[city] * boxes
+    orders[uid]['warehouses'].append({'city': city, 'boxes': boxes, 'cost': cost})
+    
+    await update.message.reply_text("Еще склад?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Да", callback_data='d_more_yes'), InlineKeyboardButton("Нет", callback_data='d_more_no')]]))
+    return D_MORE_WH
+
+async def d_more_cb(update, context):
+    query = update.callback_query; await query.answer()
+    if query.data == 'd_more_yes':
+        keyboard = [[InlineKeyboardButton(c, callback_data=f'd_wh_{c}')] for c in TARIFFS.keys()]
+        await query.edit_message_text("Склад РФ:", reply_markup=InlineKeyboardMarkup(keyboard)); return D_WAREHOUSE
+    await query.edit_message_text("Курс ₽→драм:")
+    return D_RUB_RATE
+
+async def d_rub_rate(update, context):
+    uid = str(update.effective_user.id)
+    try: orders[uid]['rub_rate'] = float(update.message.text.replace(',', '.'))
+    except: await update.message.reply_text("❌ Введи число:"); return D_RUB_RATE
+        
+    total_rub = sum(w['cost'] for w in orders[uid]['warehouses']) + 7000 # 7000 - IOB pickup
+    orders[uid]['fillx_total'] = total_rub
+    
+    msg = f"✅ <b>Доставка FILLX:</b> {total_rub}₽\nМест: {sum(w['boxes'] for w in orders[uid]['warehouses'])} шт."
+    kb = [[InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')], [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')], [InlineKeyboardButton("💾 Обновить Notion", callback_data='paste_save_direct')]]
+    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+    return ConversationHandler.END
+
+def cancel(update, context):
+    update.message.reply_text("Действие отменено.")
+    return ConversationHandler.END
+
 # ======== MAIN ========
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    
     app.add_handler(CommandHandler('paste', cmd_paste))
     
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler('zakaz', cmd_zakaz)],
+        states={
+            Z_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_name)],
+            Z_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_qty)],
+            Z_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_price)],
+            Z_PURCHASE: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_purchase)],
+            Z_DELIVERY: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_delivery)],
+            Z_DIMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_get_dims)],
+            Z_MORE: [CallbackQueryHandler(z_more_cb)],
+            Z_CLIENT_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_client_rate)],
+            Z_REAL_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, z_real_rate)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    ))
+
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler('ff', cmd_ff)],
         states={
@@ -463,10 +621,23 @@ def main():
             F_BUNDLE_WORK: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_bundle_work)],
             F_SUMMARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_summary_work)],
         },
-        fallbacks=[CommandHandler('cancel', lambda u,c: ConversationHandler.END)]
+        fallbacks=[CommandHandler('cancel', cancel)]
+    ))
+
+    app.add_handler(ConversationHandler(
+        entry_points=[CommandHandler('dostavka', cmd_dostavka)],
+        states={
+            D_WAREHOUSE: [CallbackQueryHandler(d_warehouse_cb)],
+            D_BOXES: [MessageHandler(filters.TEXT & ~filters.COMMAND, d_boxes)],
+            D_MORE_WH: [CallbackQueryHandler(d_more_cb)],
+            D_RUB_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, d_rub_rate)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
     ))
     
     app.add_handler(CallbackQueryHandler(export_handler))
+    
+    logger.info("Бот запущен. Версия v57 (Centralized Logic + ZAKAZ Restored)")
     app.run_polling()
 
 if __name__ == '__main__': main()
