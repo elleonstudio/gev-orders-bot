@@ -67,7 +67,7 @@ def optimize_boxes_with_weight(items):
             boxes.append({'items': [unit], 'rem_vol': (MAX_L * MAX_W * MAX_H) - unit['vol'], 'cur_weight': unit['weight']})
     return boxes
 
-# ======== ОТМЕНА И МЕНЮ ========
+# ======== ГЛАВНОЕ МЕНЮ И РУКОВОДСТВО ========
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text("🚫 Действие отменено. Вы вернулись в главное меню.\nНапишите /menu чтобы увидеть все команды.")
@@ -130,7 +130,7 @@ async def guide_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Напишите <code>/cargo</code>. Бот спросит упаковку и накинет вес тары (+1 кг за картон, +10 кг за дерево). Считает чистую прибыль между тарифами.
 
 <b>5. Доставка по РФ (/dostavka_new)</b>
-Напишите <code>/dostavka_new</code>. Введите имя клиента, выберите склад (например, Коледино), укажите количество коробок. Бот сам прибавит 7000₽ за IOB pickup."""
+Напишите <code>/dostavka_new</code>. Введите имя клиента, выберите склад (например, Коледино), укажите количество коробок. Бот сам прибавит 9000₽ за IOB pickup и рассчитает паллеты."""
     
     kb = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data='menu_back')]]
     await query.edit_message_text(guide_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
@@ -801,8 +801,39 @@ async def d_rub_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
     return ConversationHandler.END
 
-# ======== НОВЫЙ МОДУЛЬ /DOSTAVKA_NEW (БЕЗ ПРИВЯЗКИ) ========
+# ======== НОВЫЙ МОДУЛЬ /DOSTAVKA_NEW (С УМНЫМИ ГРЕЙДАМИ И ПАЛЛЕТАМИ) ========
+
+# Матрица тарифов и расписаний (без Ozon)
+NEW_TARIFFS = {
+    'Коледино': {'boxes': [(5, 350), (10, 300)], 'pallets': [(5, 3500), (999, 3000)], 'schedule': 'Ежедневно'},
+    'Электросталь': {'boxes': [(10, 350)], 'pallets': [(5, 3500), (999, 3000)], 'schedule': 'Ежедневно'},
+    'Тула': {'boxes': [(10, 500)], 'pallets': [(999, 5500)], 'schedule': 'Ежедневно'},
+    'Краснодар': {'boxes': [(10, 1100)], 'pallets': [(999, 9500)], 'schedule': 'Забор: Ср, Сб | Доставка: Пт, Пн'},
+    'Невинномысск': {'boxes': [(10, 1100)], 'pallets': [(999, 10500)], 'schedule': 'Забор: Вт, Пт | Доставка: Чт, Вс'},
+    'Рязань': {'boxes': [(10, 700)], 'pallets': [(999, 5500)], 'schedule': 'Ежедневно'},
+    'Котовск': {'boxes': [(10, 750)], 'pallets': [(999, 6500)], 'schedule': 'Забор: Пн, Ср, Пт | Доставка: На след. день'},
+    'Казань': {'boxes': [(7, 800), (10, 650)], 'pallets': [(999, 6500)], 'schedule': 'Забор: Пн, Ср, Чт, Сб | Доставка: На след. день'},
+    'Новосемейкино': {'boxes': [(10, 1000)], 'pallets': [(999, 9500)], 'schedule': 'Забор: Вт, Пт | Доставка: Чт, Вс'},
+    'Воронеж': {'boxes': [(10, 800)], 'pallets': [(999, 6500)], 'schedule': 'Забор: Ср, Сб | Доставка: Чт, Вс'},
+    'Пенза': {'boxes': [(10, 800)], 'pallets': [(999, 6500)], 'schedule': 'Забор: Ср, Сб | Доставка: Чт, Вс'},
+    'Владимир': {'boxes': [(10, 700)], 'pallets': [(999, 5500)], 'schedule': 'Забор: Пн, Ср, Чт, Сб | Доставка: Вт, Чт, Пт, Вс'},
+    'Сарапул': {'boxes': [(10, 1200)], 'pallets': [(999, 11000)], 'schedule': 'Забор: Пн, Ср, Сб | Доставка: Ср, Пт, Пн'},
+    'Екатеринбург': {'boxes': [(5, 1400), (10, 1200)], 'pallets': [(999, 12500)], 'schedule': 'По запросу'}
+}
+
 DN_CLIENT, DN_WH, DN_BOXES, DN_MORE, DN_RATE = range(70, 75)
+
+def generate_dn_warehouse_keyboard():
+    keyboard = []
+    row = []
+    for c in NEW_TARIFFS.keys():
+        row.append(InlineKeyboardButton(c, callback_data=f'dn_wh_{c}'))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row: 
+        keyboard.append(row)
+    return InlineKeyboardMarkup(keyboard)
 
 async def cmd_dostavka_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -814,8 +845,7 @@ async def cmd_dostavka_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def dn_get_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     orders[uid]['dn_client'] = normalize_client_name(update.message.text)
-    keyboard = [[InlineKeyboardButton(c, callback_data=f'dn_wh_{c}')] for c in TARIFFS.keys()]
-    await update.message.reply_text("Выбери склад РФ для отправки:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("Выбери склад РФ для отправки:", reply_markup=generate_dn_warehouse_keyboard())
     return DN_WH
 
 async def dn_warehouse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -829,20 +859,49 @@ async def dn_warehouse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def dn_get_boxes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     try: 
-        boxes = int(update.message.text.strip())
+        total_boxes = int(update.message.text.strip())
     except: 
         await update.message.reply_text("❌ Введи целое число:")
         return DN_BOXES
     
     city = orders[uid]['dn_current_wh']
-    if city == 'Свой тариф': 
-        await update.message.reply_text("Отмена. Выбери другой тариф через команду заново.")
-        return ConversationHandler.END
     
-    orders[uid]['dn_wh_list'].append({'city': city, 'boxes': boxes, 'cost': TARIFFS[city] * boxes})
+    # ЛОГИКА ПАЛЛЕТ
+    pallets = total_boxes // 16
+    rem_boxes = total_boxes % 16
+    if rem_boxes >= 11:
+        pallets += 1
+        rem_boxes = 0
+        
+    pallet_price = 0
+    if pallets > 0:
+        for limit, price in NEW_TARIFFS[city]['pallets']:
+            if pallets <= limit:
+                pallet_price = price
+                break
+                
+    box_price = 0
+    if rem_boxes > 0:
+        for limit, price in NEW_TARIFFS[city]['boxes']:
+            if rem_boxes <= limit:
+                box_price = price
+                break
+                
+    cost = (pallets * pallet_price) + (rem_boxes * box_price)
+    
+    orders[uid]['dn_wh_list'].append({
+        'city': city, 
+        'total_boxes': total_boxes, 
+        'pallets': pallets,
+        'pallet_price': pallet_price,
+        'rem_boxes': rem_boxes,
+        'box_price': box_price,
+        'cost': cost,
+        'schedule': NEW_TARIFFS[city]['schedule']
+    })
     
     kb = [[InlineKeyboardButton("➕ Да, выбрать еще склад", callback_data='dn_more_yes')], [InlineKeyboardButton("➡️ Нет, к расчету", callback_data='dn_more_no')]]
-    await update.message.reply_text(f"✅ Добавлено: {city} ({boxes} шт).\nЕдем на еще один склад?", reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text(f"✅ Добавлено: {city} ({total_boxes} шт).\nЕдем на еще один склад?", reply_markup=InlineKeyboardMarkup(kb))
     return DN_MORE
 
 async def dn_more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -851,11 +910,10 @@ async def dn_more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     
     if query.data == 'dn_more_yes':
-        keyboard = [[InlineKeyboardButton(c, callback_data=f'dn_wh_{c}')] for c in TARIFFS.keys()]
-        await query.edit_message_text("Выбери еще один склад РФ:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("Выбери еще один склад РФ:", reply_markup=generate_dn_warehouse_keyboard())
         return DN_WH
         
-    await query.edit_message_text("Введи курс ₽ → Драм для клиента (например, 4.5):")
+    await query.edit_message_text("Введи курс ₽ → Драм для клиента (например, 4.8):")
     return DN_RATE
 
 async def dn_get_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -867,28 +925,47 @@ async def dn_get_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return DN_RATE
     
     orders[uid]['dn_rate'] = rate
-    total_rub_boxes = sum(w['cost'] for w in orders[uid]['dn_wh_list'])
-    pickup_cost = 7000
-    total_rub = total_rub_boxes + pickup_cost
+    
+    total_boxes = sum(w['total_boxes'] for w in orders[uid]['dn_wh_list'])
+    total_rub_routes = sum(w['cost'] for w in orders[uid]['dn_wh_list'])
+    
+    razbor_cost = total_boxes * 50
+    pickup_cost = 9000
+    
+    total_rub = total_rub_routes + razbor_cost + pickup_cost
     total_amd = int(total_rub * rate)
     
     orders[uid]['dn_total_rub'] = total_rub
     orders[uid]['dn_total_amd'] = total_amd
+    orders[uid]['dn_total_boxes'] = total_boxes
     
-    lines = "\n".join([f"• {w['city']}: {w['boxes']} шт × {TARIFFS[w['city']]} ₽ = {w['cost']:,} ₽" for w in orders[uid]['dn_wh_list']])
+    # Собираем маршруты
+    lines = []
+    for w in orders[uid]['dn_wh_list']:
+        calc_parts = []
+        if w['pallets'] > 0:
+            calc_parts.append(f"{w['pallets']} палл × {w['pallet_price']} ₽")
+        if w['rem_boxes'] > 0:
+            calc_parts.append(f"{w['rem_boxes']} кор × {w['box_price']} ₽")
+            
+        calc_str = " + ".join(calc_parts)
+        lines.append(f"• {w['city']}: {calc_str} = {w['cost']:,} ₽\n  Расписание: {w['schedule']}")
+        
+    routes_text = "\n".join(lines).replace(',', ' ')
     
     msg_client = f"""ДОСТАВКА ПО РФ
 Клиент: {orders[uid]['dn_client'].upper()}
 
 МАРШРУТ И КОРОБКИ:
-{lines}
+{routes_text}
 
 УСЛУГИ FILLX:
-• Забор груза (Pickup): 7 000 ₽
+• Разбор коробов: {total_boxes} шт × 50 ₽ = {razbor_cost:,} ₽
+• Забор груза (ЮВ) (Грузчики/заезд/доставка): 9 000 ₽
 
 Итого в рублях: {total_rub:,} ₽
 Курс конвертации: {rate}
-К ОПЛАТЕ: {total_amd:,} AMD"""
+К ОПЛАТЕ: {total_amd:,} AMD""".replace(',', ' ')
 
     kb = [[InlineKeyboardButton("📊 Export Excel", callback_data='dn_export_ex')], [InlineKeyboardButton("🗑 Отменить / Удалить", callback_data='dn_delete')]]
     await update.message.reply_text(msg_client, reply_markup=InlineKeyboardMarkup(kb))
@@ -1182,16 +1259,20 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         output.seek(0)
         await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(output, filename=f"Cargo_{draft['client']}.xlsx"))
 
-    elif query.data == 'cg_delete':
-        del cargo_drafts[uid][orders[uid].get('active_cargo_id')]
-        await query.edit_message_text(f"{query.message.text}\n\n✅ **Партия закрыта и удалена из черновиков.**", parse_mode='Markdown')
-
     elif query.data == 'dn_export_ex':
         items_data = []
         for w in orders[uid]['dn_wh_list']: 
-            items_data.append({"Описание услуги": f"Доставка на склад: {w['city']}", "Количество": f"{w['boxes']} коробок", "Тариф (RUB)": f"{TARIFFS[w['city']]} ₽", "Сумма (RUB)": f"{w['cost']} ₽"})
-        items_data.append({"Описание услуги": "Организация забора груза (Pickup)", "Количество": "1 услуга", "Тариф (RUB)": "7000 ₽", "Сумма (RUB)": "7000 ₽"})
-        items_data.extend([{"Описание услуги": "ИТОГО ЛОГИСТИКА (RUB):", "Количество": "", "Тариф (RUB)": "", "Сумма (RUB)": f"{orders[uid]['dn_total_rub']} ₽"}, {"Описание услуги": "КУРС КОНВЕРТАЦИИ:", "Количество": "", "Тариф (RUB)": "", "Сумма (RUB)": str(orders[uid]['dn_rate'])}, {"Описание услуги": "ИТОГО К ОПЛАТЕ (AMD):", "Количество": "", "Тариф (RUB)": "", "Сумма (RUB)": f"{orders[uid]['dn_total_amd']} ֏"}])
+            desc = f"Доставка на склад: {w['city']} (Паллет: {w['pallets']}, Короб: {w['rem_boxes']})"
+            items_data.append({"Описание услуги": desc, "Количество": f"{w['total_boxes']} шт", "Тариф (RUB)": "-", "Сумма (RUB)": f"{w['cost']} ₽"})
+            
+        items_data.append({"Описание услуги": "Разбор коробов", "Количество": f"{orders[uid]['dn_total_boxes']} шт", "Тариф (RUB)": "50 ₽", "Сумма (RUB)": f"{orders[uid]['dn_total_boxes']*50} ₽"})
+        items_data.append({"Описание услуги": "Забор груза (ЮВ) (Грузчики/заезд/доставка)", "Количество": "1 услуга", "Тариф (RUB)": "9000 ₽", "Сумма (RUB)": "9000 ₽"})
+        
+        items_data.extend([
+            {"Описание услуги": "ИТОГО ЛОГИСТИКА (RUB):", "Количество": "", "Тариф (RUB)": "", "Сумма (RUB)": f"{orders[uid]['dn_total_rub']} ₽"}, 
+            {"Описание услуги": "КУРС КОНВЕРТАЦИИ:", "Количество": "", "Тариф (RUB)": "", "Сумма (RUB)": str(orders[uid]['dn_rate'])}, 
+            {"Описание услуги": "ИТОГО К ОПЛАТЕ (AMD):", "Количество": "", "Тариф (RUB)": "", "Сумма (RUB)": f"{orders[uid]['dn_total_amd']} ֏"}
+        ])
         
         df = pd.DataFrame(items_data)
         output = io.BytesIO()
@@ -1306,7 +1387,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$'))
     
-    logger.info("Бот запущен. Версия v64 (SAFE CANCEL & INPUT FIX)")
+    logger.info("Бот запущен. Версия v65 (DOSTAVKA_NEW PRO + PALLETS)")
     app.run_polling()
 
 if __name__ == '__main__': 
