@@ -131,30 +131,61 @@ async def save_to_notion(uid):
 
 # ======== ГЛАВНОЕ МЕНЮ И РУКОВОДСТВО ========
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_main_menu(update.message)
+    menu_text = """🎛 <b>ГЛАВНОЕ МЕНЮ БОТА</b>
 
-async def show_main_menu(message_obj):
-    menu_text = """🎛 **ГЛАВНОЕ МЕНЮ БОТА**
+📦 <b>ЛОГИСТИКА И КАРГО</b>
+• /cargo — Управление Карго (расчет упаковки, тарифы).
+• /ff — Фулфилмент в Китае (коробки до 30 кг).
+• /dostavka_new — Доставка по РФ (с нуля для клиента).
+• /dostavka — Доставка по РФ (привязка к текущему выкупу).
 
-📦 **ЛОГИСТИКА И КАРГО**
-• /cargo — Карго (создание партий, габариты, тарифы).
-• /ff — Фулфилмент (сборка наборов, расчет коробок).
-• /dostavka — Доставка по РФ.
+🛒 <b>ВЫКУП ТОВАРОВ</b>
+• /zakaz [Имя] — Ручной пошаговый ввод нового заказа.
+• /paste [Текст] — Создание заказа из слипшегося текста.
+• /calc [Текст] — Калькулятор инвойса с дополнением данных.
 
-🛒 **ВЫКУП ТОВАРОВ**
-• /zakaz [Имя] — Ручной пошаговый ввод заказа.
-• /paste [Текст] — Умный парсер из текста.
-• /calc [Текст] — Быстрый калькулятор.
+📊 <b>ЭКСПОРТ И БАЗЫ ДАННЫХ</b>
+В конце каждого расчета доступны кнопки Airtable, Excel и Notion."""
 
-📊 **ЭКСПОРТ И БАЗЫ ДАННЫХ**
-• 📑 **Airtable** (Данные для второго ИИ)
-• 📊 **Excel** (Инвойсы и упаковка)
-• 💾 **Notion** (Облачная база)"""
+    kb = [[InlineKeyboardButton("📖 Открыть подробное руководство", callback_data='guide_open')]]
+    if update.message:
+        await update.message.reply_text(menu_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+    else:
+        await update.callback_query.edit_message_text(menu_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+
+async def guide_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; await query.answer()
+    guide_text = """📖 <b>РУКОВОДСТВО ПО ИСПОЛЬЗОВАНИЮ БОТА</b>
+
+<b>1. Выкуп из текста (/paste или /calc)</b>
+Скопируйте текст от поставщика и отправьте боту.
+<i>Пример:</i>
+<code>/paste
+Клиент: Zaven
+Товар 1
+Название: Куртки
+Количество: 10
+Цена клиенту: 50
+Закупка: 40
+Доставка: 10
+Курс клиенту: 58
+Мой курс: 55</code>
+
+<b>2. Интерактивный выкуп (/zakaz)</b>
+Напишите /zakaz Zaven и бот сам спросит название, количество, цены и размеры шаг за шагом.
+
+<b>3. Фулфилмент (/ff)</b>
+Запускается ТОЛЬКО после /paste или /zakaz. Позволяет собрать товары в наборы, выбрать упаковку и распределить всё по коробкам (до 30 кг).
+
+<b>4. Логистика Карго (/cargo)</b>
+Независимый модуль. Напишите /cargo, создайте партию. 
+Бот спросит упаковку и накинет вес тары (+1 кг за картон, +10 кг за дерево). Считает чистую прибыль.
+
+<b>5. Доставка по РФ (/dostavka_new)</b>
+Напишите /dostavka_new, введите имя, выберите склад, укажите коробки. Бот сам прибавит 7000₽ за забор груза и выдаст счет."""
     
-    kb = [[InlineKeyboardButton("📖 Открыть подробное Руководство", callback_data='menu_guide')]]
-    
-    if hasattr(message_obj, 'edit_text'):
-        await message_obj.edit_text(menu_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+    kb = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data='menu_back')]]
+    await query.edit_message_text(guide_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
     else:
         await message_obj.reply_text(menu_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
 
