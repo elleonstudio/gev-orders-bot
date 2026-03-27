@@ -28,12 +28,6 @@ notion = Client(auth=NOTION_TOKEN) if NOTION_TOKEN else None
 orders = {}
 cargo_drafts = {}
 
-TARIFFS = {
-    'Коледино': 350, 'Невинномысск': 1100, 'Электросталь': 400, 'Белые Столбы': 350,
-    'Чашниково': 350, 'Санкт-Петербург': 450, 'Казань': 450, 'Екатеринбург': 700,
-    'Новосибирск': 850, 'Владивосток': 1000, 'Краснодар': 550, 'Свой тариф': 0
-}
-
 # ======== УТИЛИТЫ ========
 def normalize_client_name(name):
     return re.sub(r'\s+', '', name).strip().capitalize()
@@ -81,7 +75,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📦 <b>ЛОГИСТИКА И КАРГО</b>
 • /cargo — Управление Карго (расчет упаковки, тарифы).
 • /ff — Фулфилмент в Китае (коробки до 30 кг).
-• /dostavka_new — Доставка РФ (новый независимый расчет).
+• /dostavka_new — Доставка РФ (независимый расчет с нуля).
 • /dostavka — Доставка РФ (привязка к текущему выкупу).
 
 🛒 <b>ВЫКУП ТОВАРОВ</b>
@@ -108,29 +102,20 @@ async def guide_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>1. Выкуп из текста (/paste или /calc)</b>
 Скопируйте текст от поставщика и отправьте боту.
-<i>Пример:</i>
-<code>/paste
-Клиент: Zaven
-Товар 1
-Название: Куртки
-Количество: 10
-Цена клиенту: 50
-Закупка: 40
-Доставка: 10
-Курс клиенту: 58
-Мой курс: 55</code>
 
 <b>2. Интерактивный выкуп (/zakaz)</b>
-Напишите <code>/zakaz Zaven</code> и бот сам спросит название, количество, цены и размеры шаг за шагом.
+Напишите <code>/zakaz Zaven</code> и бот сам спросит название, количество, цены и размеры.
 
 <b>3. Фулфилмент (/ff)</b>
-Запускается ТОЛЬКО после выкупа. Позволяет собрать товары в наборы и автоматически распределить всё по коробкам (максимум 30 кг в одной).
+Запускается после выкупа. Распределяет товары по коробкам (до 30 кг в одной).
 
 <b>4. Логистика Карго (/cargo)</b>
-Напишите <code>/cargo</code>. Бот спросит упаковку и накинет вес тары (+1 кг за картон, +10 кг за дерево). Считает чистую прибыль между тарифами.
+Напишите <code>/cargo</code>. Считает прибыль между тарифами, накидывает вес упаковки (+1 кг картон, +10 кг дерево).
 
-<b>5. Доставка по РФ (/dostavka_new)</b>
-Напишите <code>/dostavka_new</code>. Введите имя клиента, выберите склад (например, Коледино), укажите количество коробок. Бот сам прибавит 9000₽ за IOB pickup и рассчитает паллеты."""
+<b>5. Доставка по РФ (/dostavka и /dostavka_new)</b>
+• <code>/dostavka</code> — продолжает работу с текущим просчитанным клиентом (после /zakaz или /paste). Дает кнопки для обновления Notion и общего инвойса.
+• <code>/dostavka_new</code> — начинает расчет с нуля для нового клиента (внешний груз).
+<i>Как бот считает РФ:</i> Автоматически делит коробки на паллеты (от 11 шт — это 1 паллет). Применяет оптовые грейды (от 6 паллет тариф ниже). Прибавляет услуги FILLX: 100₽/приемка, 50₽/разбор, 9000₽/забор груза."""
     
     kb = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data='menu_back')]]
     await query.edit_message_text(guide_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
@@ -737,71 +722,8 @@ async def ff_summary_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(res, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
     return ConversationHandler.END
 
-# ======== ФУНКЦИИ DOSTAVKA (СТАРАЯ С ПРИВЯЗКОЙ) ========
-D_WAREHOUSE, D_BOXES, D_MORE_WH, D_RUB_RATE = range(30, 34)
 
-async def cmd_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    if uid not in orders: 
-        await update.message.reply_text("Сначала /zakaz или /paste")
-        return ConversationHandler.END
-        
-    orders[uid]['warehouses'] = []
-    keyboard = [[InlineKeyboardButton(c, callback_data=f'd_wh_{c}')] for c in TARIFFS.keys()]
-    await update.message.reply_text("Выбери склад РФ:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return D_WAREHOUSE
-
-async def d_warehouse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = str(update.effective_user.id)
-    orders[uid]['current_wh'] = query.data.replace('d_wh_', '')
-    await query.edit_message_text("Количество коробок:")
-    return D_BOXES
-
-async def d_boxes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    try:
-        boxes = int(update.message.text.strip())
-    except:
-        await update.message.reply_text("❌ Введи целое число:")
-        return D_BOXES
-        
-    city = orders[uid]['current_wh']
-    if city == 'Свой тариф': 
-        await update.message.reply_text("Выбери другой через /dostavka")
-        return ConversationHandler.END
-        
-    orders[uid]['warehouses'].append({'city': city, 'boxes': boxes, 'cost': TARIFFS[city] * boxes})
-    await update.message.reply_text("Еще склад?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Да", callback_data='d_more_yes'), InlineKeyboardButton("Нет", callback_data='d_more_no')]]))
-    return D_MORE_WH
-
-async def d_more_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.data == 'd_more_yes':
-        await query.edit_message_text("Склад РФ:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(c, callback_data=f'd_wh_{c}')] for c in TARIFFS.keys()]))
-        return D_WAREHOUSE
-    await query.edit_message_text("Курс ₽→драм:")
-    return D_RUB_RATE
-
-async def d_rub_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    try:
-        orders[uid]['rub_rate'] = float(update.message.text.replace(',', '.'))
-    except:
-        await update.message.reply_text("❌ Введи число:")
-        return D_RUB_RATE
-        
-    total_rub = sum(w['cost'] for w in orders[uid]['warehouses']) + 7000 
-    
-    msg = f"✅ <b>Доставка FILLX:</b> {total_rub}₽\nМест: {sum(w['boxes'] for w in orders[uid]['warehouses'])} шт."
-    kb = [[InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')], [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')], [InlineKeyboardButton("💾 Обновить Notion", callback_data='paste_save_direct')]]
-    
-    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
-    return ConversationHandler.END
-
-# ======== НОВЫЙ МОДУЛЬ /DOSTAVKA_NEW (С УМНЫМИ ГРЕЙДАМИ И ПАЛЛЕТАМИ) ========
+# ======== ЕДИНЫЙ МОДУЛЬ ДОСТАВКИ РФ (/DOSTAVKA И /DOSTAVKA_NEW) ========
 
 NEW_TARIFFS = {
     'Коледино': {'boxes': [(5, 350), (10, 300)], 'pallets': [(5, 3500), (999, 3000)], 'schedule': 'Ежедневно'},
@@ -834,10 +756,12 @@ def generate_dn_warehouse_keyboard():
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
+# Точка входа для /dostavka_new (без привязки)
 async def cmd_dostavka_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     orders[uid] = orders.get(uid, {})
     orders[uid]['dn_wh_list'] = []
+    orders[uid]['is_linked_dostavka'] = False
     await update.message.reply_text("Напиши имя клиента для расчета доставки по РФ:")
     return DN_CLIENT
 
@@ -845,6 +769,20 @@ async def dn_get_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     orders[uid]['dn_client'] = normalize_client_name(update.message.text)
     await update.message.reply_text("Выбери склад РФ для отправки:", reply_markup=generate_dn_warehouse_keyboard())
+    return DN_WH
+
+# Точка входа для /dostavka (с привязкой к /zakaz или /paste)
+async def cmd_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id)
+    if uid not in orders or 'client' not in orders[uid]: 
+        await update.message.reply_text("❌ Сначала создай заказ через /zakaz или /paste")
+        return ConversationHandler.END
+        
+    orders[uid]['dn_client'] = orders[uid]['client']
+    orders[uid]['dn_wh_list'] = []
+    orders[uid]['is_linked_dostavka'] = True
+    
+    await update.message.reply_text(f"📦 Расчет доставки для текущего клиента: <b>{orders[uid]['client']}</b>\n\nВыбери склад РФ для отправки:", parse_mode='HTML', reply_markup=generate_dn_warehouse_keyboard())
     return DN_WH
 
 async def dn_warehouse_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -966,7 +904,15 @@ async def dn_get_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Курс конвертации: {rate}
 К ОПЛАТЕ: {total_amd:,} AMD""".replace(',', ' ')
 
-    kb = [[InlineKeyboardButton("📊 Export Excel", callback_data='dn_export_ex')], [InlineKeyboardButton("🗑 Отменить / Удалить", callback_data='dn_delete')]]
+    if orders[uid].get('is_linked_dostavka'):
+        kb = [
+            [InlineKeyboardButton("🚚 Excel Доставка", callback_data='dn_export_ex'), InlineKeyboardButton("📊 Excel Товары", callback_data='gen_excel')],
+            [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')],
+            [InlineKeyboardButton("💾 Обновить Notion", callback_data='paste_save_direct')]
+        ]
+    else:
+        kb = [[InlineKeyboardButton("📊 Export Excel", callback_data='dn_export_ex')], [InlineKeyboardButton("🗑 Отменить / Удалить", callback_data='dn_delete')]]
+        
     await update.message.reply_text(msg_client, reply_markup=InlineKeyboardMarkup(kb))
     return ConversationHandler.END
 
@@ -1286,10 +1232,6 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'dn_delete':
         await query.edit_message_text(f"{query.message.text}\n\n✅ Расчет отменен и удален.")
 
-def cancel(update, context): 
-    update.message.reply_text("Действие отменено.")
-    return ConversationHandler.END
-
 # ======== MAIN ========
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -1346,10 +1288,10 @@ def main():
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler('dostavka', cmd_dostavka)],
         states={
-            D_WAREHOUSE: [CallbackQueryHandler(d_warehouse_cb)], 
-            D_BOXES: [MessageHandler(filters.TEXT & ~filters.COMMAND, d_boxes)], 
-            D_MORE_WH: [CallbackQueryHandler(d_more_cb)], 
-            D_RUB_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, d_rub_rate)]
+            DN_WH: [CallbackQueryHandler(dn_warehouse_cb)], 
+            DN_BOXES: [MessageHandler(filters.TEXT & ~filters.COMMAND, dn_get_boxes)], 
+            DN_MORE: [CallbackQueryHandler(dn_more_cb)], 
+            DN_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, dn_get_rate)]
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
@@ -1391,7 +1333,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$'))
     
-    logger.info("Бот запущен. Версия v66 (DOSTAVKA PRIEMKA +100)")
+    logger.info("Бот запущен. Версия v68 (SMART DOSTAVKA X2)")
     app.run_polling()
 
 if __name__ == '__main__': 
