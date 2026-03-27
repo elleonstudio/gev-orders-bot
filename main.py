@@ -803,7 +803,6 @@ async def d_rub_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ======== НОВЫЙ МОДУЛЬ /DOSTAVKA_NEW (С УМНЫМИ ГРЕЙДАМИ И ПАЛЛЕТАМИ) ========
 
-# Матрица тарифов и расписаний (без Ozon)
 NEW_TARIFFS = {
     'Коледино': {'boxes': [(5, 350), (10, 300)], 'pallets': [(5, 3500), (999, 3000)], 'schedule': 'Ежедневно'},
     'Электросталь': {'boxes': [(10, 350)], 'pallets': [(5, 3500), (999, 3000)], 'schedule': 'Ежедневно'},
@@ -866,7 +865,6 @@ async def dn_get_boxes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     city = orders[uid]['dn_current_wh']
     
-    # ЛОГИКА ПАЛЛЕТ
     pallets = total_boxes // 16
     rem_boxes = total_boxes % 16
     if rem_boxes >= 11:
@@ -929,17 +927,17 @@ async def dn_get_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_boxes = sum(w['total_boxes'] for w in orders[uid]['dn_wh_list'])
     total_rub_routes = sum(w['cost'] for w in orders[uid]['dn_wh_list'])
     
+    priemka_cost = total_boxes * 100
     razbor_cost = total_boxes * 50
     pickup_cost = 9000
     
-    total_rub = total_rub_routes + razbor_cost + pickup_cost
+    total_rub = total_rub_routes + priemka_cost + razbor_cost + pickup_cost
     total_amd = int(total_rub * rate)
     
     orders[uid]['dn_total_rub'] = total_rub
     orders[uid]['dn_total_amd'] = total_amd
     orders[uid]['dn_total_boxes'] = total_boxes
     
-    # Собираем маршруты
     lines = []
     for w in orders[uid]['dn_wh_list']:
         calc_parts = []
@@ -960,6 +958,7 @@ async def dn_get_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {routes_text}
 
 УСЛУГИ FILLX:
+• Приемка товара коробами: {total_boxes} шт × 100 ₽ = {priemka_cost:,} ₽
 • Разбор коробов: {total_boxes} шт × 50 ₽ = {razbor_cost:,} ₽
 • Забор груза (ЮВ) (Грузчики/заезд/доставка): 9 000 ₽
 
@@ -1265,6 +1264,7 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             desc = f"Доставка на склад: {w['city']} (Паллет: {w['pallets']}, Короб: {w['rem_boxes']})"
             items_data.append({"Описание услуги": desc, "Количество": f"{w['total_boxes']} шт", "Тариф (RUB)": "-", "Сумма (RUB)": f"{w['cost']} ₽"})
             
+        items_data.append({"Описание услуги": "Приемка товара коробами", "Количество": f"{orders[uid]['dn_total_boxes']} шт", "Тариф (RUB)": "100 ₽", "Сумма (RUB)": f"{orders[uid]['dn_total_boxes']*100} ₽"})
         items_data.append({"Описание услуги": "Разбор коробов", "Количество": f"{orders[uid]['dn_total_boxes']} шт", "Тариф (RUB)": "50 ₽", "Сумма (RUB)": f"{orders[uid]['dn_total_boxes']*50} ₽"})
         items_data.append({"Описание услуги": "Забор груза (ЮВ) (Грузчики/заезд/доставка)", "Количество": "1 услуга", "Тариф (RUB)": "9000 ₽", "Сумма (RUB)": "9000 ₽"})
         
@@ -1285,6 +1285,10 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == 'dn_delete':
         await query.edit_message_text(f"{query.message.text}\n\n✅ Расчет отменен и удален.")
+
+def cancel(update, context): 
+    update.message.reply_text("Действие отменено.")
+    return ConversationHandler.END
 
 # ======== MAIN ========
 def main():
@@ -1387,7 +1391,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$'))
     
-    logger.info("Бот запущен. Версия v65 (DOSTAVKA_NEW PRO + PALLETS)")
+    logger.info("Бот запущен. Версия v66 (DOSTAVKA PRIEMKA +100)")
     app.run_polling()
 
 if __name__ == '__main__': 
