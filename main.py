@@ -21,7 +21,7 @@ NOTION_DATABASE_ID = "3278c4d1fb0e80c4b6e5f261d0631ed2"
 PACKAGES_DATABASE_ID = "32a8c4d1fb0e806ebb98f5995704d0e5"
 
 # TODO: ВСТАВЬ СЮДА ID НОВОЙ БАЗЫ NOTION ДЛЯ ЧЕРНОВИКОВ CARGO!
-CARGO_NOTION_DATABASE_ID = os.getenv('CARGO_NOTION_DB_ID', "3308c4d1fb0e80f6abe7cb80a1d989d0") 
+CARGO_NOTION_DATABASE_ID = os.getenv('CARGO_NOTION_DB_ID', "СЮДА_ID_БАЗЫ_CARGO") 
 
 BOX_PRICE_CNY = 7.77
 MAX_BOX_WEIGHT = 30.0  # Лимит веса на одну коробку
@@ -223,6 +223,28 @@ async def save_to_notion(uid):
             orders[uid]['notion_page_id'] = res['id']
         return f"https://notion.so/{res['id'].replace('-', '')}"
     except: return None
+
+# ======== ГЛАВНОЕ МЕНЮ (/MENU) ========
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_text = """🎛 **ГЛАВНОЕ МЕНЮ БОТА**
+
+📦 **ЛОГИСТИКА И КАРГО**
+• /cargo — Управление Карго (создание партий, черновики, расчет упаковки, тарифы).
+• /ff — Фулфилмент в Китае (сборка наборов, расчет коробок до 30 кг).
+• /dostavka — Доставка по РФ (расчет тарифов до складов маркетплейсов).
+
+🛒 **ВЫКУП ТОВАРОВ**
+• /zakaz [Имя] — Ручной пошаговый ввод нового заказа.
+• /paste [Текст] — Умный парсер (создание заказа из слипшегося текста).
+• /calc [Текст] — Быстрый калькулятор инвойса с дополнением данных.
+
+📊 **ЭКСПОРТ И БАЗЫ ДАННЫХ**
+В конце каждого расчета доступны кнопки:
+• 📑 **Airtable** (Данные для второго ИИ)
+• 📊 **Excel** (Инвойсы и упаковочные листы)
+• 💾 **Notion** (Облачное хранение)"""
+
+    await update.message.reply_text(menu_text, parse_mode='Markdown')
 
 # ======== СУПЕР-ПАРСЕР /PASTE & /CALC ========
 def parse_paste_text(text):
@@ -893,6 +915,8 @@ async def cg_export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
+    app.add_handler(CommandHandler('start', cmd_menu))
+    app.add_handler(CommandHandler('menu', cmd_menu))
     app.add_handler(CommandHandler('paste', cmd_paste))
     app.add_handler(CommandHandler('calc', cmd_calc))
     
@@ -947,7 +971,6 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
     
-    # Регистрация НОВЫХ хендлеров для /cargo
     app.add_handler(CommandHandler('cargo', cmd_cargo))
     app.add_handler(CallbackQueryHandler(cg_open_draft, pattern='^cg_open_'))
     
@@ -974,7 +997,7 @@ def main():
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$'))
     app.add_handler(CallbackQueryHandler(cg_export_handler, pattern='^cg_export_|^cg_delete$'))
     
-    logger.info("Бот запущен. Версия v60 (FULL SCRIPT: Cargo + Paste + Calc + FF + Zakaz + Dostavka)")
+    logger.info("Бот запущен. Версия v60 (FULL SCRIPT: Cargo + Menu + Paste + Calc + FF + Zakaz + Dostavka)")
     app.run_polling()
 
 if __name__ == '__main__': main()
