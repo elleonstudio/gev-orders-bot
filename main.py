@@ -110,7 +110,7 @@ async def guide_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Запускается после выкупа. Распределяет товары по коробкам (до 30 кг в одной).
 
 <b>4. Логистика Карго (/cargo)</b>
-Напишите <code>/cargo</code>. Считает прибыль между тарифами, накидывает вес упаковки (+1 кг картон, +10 кг дерево).
+Напишите <code>/cargo</code>. Считает прибыль между тарифами, накидывает вес упаковки (+1 кг картон, +10 кг дерево). Поддерживает сохранение в черновики.
 
 <b>5. Доставка по РФ (/dostavka и /dostavka_new)</b>
 • <code>/dostavka</code> — продолжает работу с текущим просчитанным клиентом (после /zakaz или /paste). Дает кнопки для обновления Notion и общего инвойса.
@@ -756,6 +756,7 @@ def generate_dn_warehouse_keyboard():
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
+# Точка входа для /dostavka_new (без привязки)
 async def cmd_dostavka_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     orders[uid] = orders.get(uid, {})
@@ -770,6 +771,7 @@ async def dn_get_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Выбери склад РФ для отправки:", reply_markup=generate_dn_warehouse_keyboard())
     return DN_WH
 
+# Точка входа для /dostavka (с привязкой к /zakaz или /paste)
 async def cmd_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     if uid not in orders or 'client' not in orders[uid]: 
@@ -1347,7 +1349,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$'))
     
-    logger.info("Бот запущен. Версия v69 (EXCEL TARIFF FIX)")
+    logger.info("Бот запущен. Версия v70 (FINAL STABLE + CARGO DRAFTS)")
     app.run_polling()
 
 if __name__ == '__main__': 
