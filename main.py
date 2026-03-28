@@ -82,6 +82,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /zakaz [Имя] — Ручной пошаговый ввод нового заказа.
 • /paste [Текст] — Создание заказа из текста поставщика.
 • /calc [Текст] — Быстрый калькулятор инвойса.
+• /audit-gs [Текст от Kimi] — Аудит и генерация чека.
 
 ⚙️ <b>СИСТЕМА</b>
 • /cancel — Прервать любое действие и сбросить бота.
@@ -119,6 +120,82 @@ async def guide_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     kb = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data='menu_back')]]
     await query.edit_message_text(guide_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
+
+# ======== СУПЕР-АУДИТОР ОТ KIMI (/AUDIT-GS) ========
+async def cmd_audit_gs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.replace('/audit-gs', '').strip()
+    if not text: 
+        return await update.message.reply_text("❌ Пустой запрос. Пришли текст от Kimi.")
+        
+    if '❌ Найдены ошибки' not in text or '✅ Исправленный расчет' not in text:
+        return await update.message.reply_text("❌ Ошибка формата: не найдены обязательные маркеры Kimi (❌ Найдены ошибки / ✅ Исправленный расчет).")
+        
+    try:
+        # Разрезаем текст на 3 логические части
+        part1, rest = text.split('❌ Найдены ошибки', 1)
+        original_text = part1.strip()
+        
+        part2, part3 = rest.split('✅ Исправленный расчет', 1)
+        error_log = '❌ Найдены ошибки' + part2.strip()
+        corrected_text = part3.strip().lstrip(':').strip() # Убираем лишнее двоеточие, если оно есть
+        
+        # Парсим исправленный расчет построчно
+        lines = [line.strip() for line in corrected_text.split('\n') if line.strip()]
+        client_name = lines[0]
+        
+        items = []
+        for line in lines[1:]:
+            # Ищем формулу товара: 7.5×200+144=1644 vase (доставка может отсутствовать)
+            m = re.match(r'([\d\.]+)\s*[×x*]\s*(\d+)(?:\s*\+\s*([\d\.]+))?\s*=\s*[\d\.]+\s+(.+)', line, re.IGNORECASE)
+            if m:
+                price = float(m.group(1))
+                qty = int(m.group(2))
+                delivery = float(m.group(3)) if m.group(3) else 0.0
+                name = m.group(4).strip().title()
+                items.append({'name': name, 'qty': qty, 'price': price, 'delivery_factory': delivery})
+                
+        # Ищем курс клиента (например 2470×58=)
+        client_rate = 58.0
+        rate_match = re.search(r'[×x*]\s*([\d\.]+)\s*=', corrected_text)
+        if rate_match:
+            client_rate = float(rate_match.group(1))
+            
+        if not items:
+            return await update.message.reply_text("❌ Не удалось распознать товары из исправленного расчета. Проверь формулы.")
+            
+        # Внутренняя математика (чтобы всё сошлось 1 в 1)
+        subtotal_cny = sum((i['price'] * i['qty']) + i['delivery_factory'] for i in items)
+        comm_amd_3pct = (subtotal_cny * 0.03) * client_rate
+        rule_applied = comm_amd_3pct < 10000
+        actual_comm_cny = 10000 / client_rate if rule_applied else subtotal_cny * 0.03
+        actual_comm_amd = 10000 if rule_applied else int(comm_amd_3pct)
+        final_total_amd = int((subtotal_cny * client_rate) + actual_comm_amd)
+        
+        # Собираем красивый чек клиента
+        inv_lines = ""
+        for i in items:
+            inv_lines += f"• {i['name']} — {i['qty']} шт\n"
+            inv_lines += f"{i['qty']} × {i['price']} + {i['delivery_factory']} = {(i['price'] * i['qty']) + i['delivery_factory']:.1f}¥\n"
+            
+        msg = f"<b>COMMERCIAL INVOICE: {client_name.upper()}</b>\n"
+        msg += f"📅 Date: {datetime.now().strftime('%d.%m.%Y')}\n\n"
+        msg += f"<b>ОРИГИНАЛЬНЫЙ РАСЧЕТ (С ошибками):</b>\n{original_text}\n\n"
+        msg += f"{error_log}\n\n"
+        msg += f"✅ <b>ИСПРАВЛЕННАЯ ТОВАРНАЯ ВЕДОМОСТЬ</b>\n"
+        msg += f"{inv_lines}<code>────────────────────────</code>\n"
+        msg += f"<b>SUBTOTAL:</b> {subtotal_cny:.1f}¥\n\n"
+        msg += f"<b>КОМИССИЯ И СЕРВИС (Service Fee)</b>\n"
+        msg += f"({'Минимальная 10000 AMD' if rule_applied else '3%'}): {actual_comm_cny:.1f}¥\n\n"
+        msg += f"<b>ИТОГОВЫЙ РАСЧЕТ (Convertation)</b>\n"
+        msg += f"• Всего в юанях: {subtotal_cny + actual_comm_cny:.1f}¥\n"
+        msg += f"• Курс: {client_rate}\n\n"
+        msg += f"✅ <b>ИТОГО К ОПЛАТЕ: {final_total_amd:,} AMD</b>"
+        
+        # Отправляем единое сообщение без кнопок
+        await update.message.reply_text(msg, parse_mode='HTML')
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Произошла ошибка при обработке: {e}")
 
 # ======== ЕДИНЫЙ ЦЕНТР РАСЧЕТОВ ТОВАРОВ ========
 async def finalize_order(uid, message_obj):
@@ -1235,6 +1312,7 @@ def main():
     app.add_handler(CommandHandler('start', cmd_menu))
     app.add_handler(CommandHandler('menu', cmd_menu))
     app.add_handler(CommandHandler('cancel', cancel))
+    app.add_handler(CommandHandler('audit-gs', cmd_audit_gs))
     app.add_handler(CallbackQueryHandler(guide_open, pattern='^guide_open$'))
     app.add_handler(CallbackQueryHandler(cmd_menu, pattern='^menu_back$'))
     
@@ -1324,7 +1402,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$|^dn_export_airtable$'))
     
-    logger.info("Бот запущен. Версия v73 (AIRTABLE FIXED)")
+    logger.info("Бот запущен. Версия v74 (AUDIT-GS INTEGRATION)")
     app.run_polling()
 
 if __name__ == '__main__': 
