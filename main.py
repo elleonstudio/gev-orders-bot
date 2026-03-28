@@ -7,7 +7,7 @@ import re
 import io
 import pandas as pd
 from datetime import datetime
-from notion_client import Client
+from notion_client import AsyncClient
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
 
@@ -24,9 +24,18 @@ CARGO_NOTION_DATABASE_ID = os.getenv('CARGO_NOTION_DB_ID', "СЮДА_ID_БАЗЫ
 BOX_PRICE_CNY = 7.77
 MAX_BOX_WEIGHT = 30.0
 
-notion = Client(auth=NOTION_TOKEN) if NOTION_TOKEN else None
+notion = AsyncClient(auth=NOTION_TOKEN) if NOTION_TOKEN else None
 orders = {}
 cargo_drafts = {}
+
+# ======== ГЛОБАЛЬНЫЙ ЛОВЕЦ ОШИБОК ========
+async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(f"⚠️ <b>Системная ошибка:</b>\n<code>{context.error}</code>", parse_mode='HTML')
+    except:
+        pass
 
 # ======== УТИЛИТЫ ========
 def normalize_client_name(name):
@@ -82,7 +91,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /zakaz [Имя] — Ручной пошаговый ввод нового заказа.
 • /paste [Текст] — Создание заказа из текста поставщика.
 • /calc [Текст] — Быстрый калькулятор инвойса.
-• /audit-gs [Текст] — Аудит и генерация чека от Kimi.
+• /audit_gs [Текст] — Аудит и генерация чека от Kimi.
 
 ⚙️ <b>СИСТЕМА</b>
 • /cancel — Прервать любое действие и сбросить бота.
@@ -115,8 +124,7 @@ async def guide_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <b>5. Доставка по РФ (/dostavka и /dostavka_new)</b>
 • <code>/dostavka</code> — продолжает работу с текущим просчитанным клиентом (после /zakaz или /paste). Дает кнопки для обновления Notion и общего инвойса.
-• <code>/dostavka_new</code> — начинает расчет с нуля для нового клиента (внешний груз).
-<i>Как бот считает РФ:</i> Автоматически делит коробки на паллеты (от 11 шт — это 1 паллет). Применяет оптовые грейды (от 6 паллет тариф ниже). Прибавляет услуги FILLX: 100₽/приемка, 50₽/разбор, 9000₽/забор груза."""
+• <code>/dostavka_new</code> — начинает расчет с нуля для нового клиента (внешний груз)."""
     
     kb = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data='menu_back')]]
     await query.edit_message_text(guide_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
@@ -171,7 +179,6 @@ async def cmd_audit_gs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [line.strip() for line in corrected_text.split('\n') if line.strip()]
         items = []
         for line in lines:
-            # Ищем формулу: 7.5×200+144=1644 vase
             m = re.match(r'^([\d\.]+)\s*[×x*]\s*(\d+)(?:\s*\+\s*([\d\.]+))?\s*=\s*[\d\.]+\s+(.+)$', line, re.IGNORECASE)
             if m:
                 price = float(m.group(1))
@@ -318,7 +325,7 @@ async def get_packages_from_notion():
     if not notion or not PACKAGES_DATABASE_ID: 
         return []
     try:
-        res = notion.databases.query(database_id=PACKAGES_DATABASE_ID)
+        res = await notion.databases.query(database_id=PACKAGES_DATABASE_ID)
         return [{'name': p['properties'].get('Название', {}).get('title', [{}])[0].get('text', {}).get('content', ''), 'price': p['properties'].get('Цена', {}).get('number', 0)} for p in res.get('results', []) if p['properties'].get('Название', {}).get('title') and p['properties'].get('Цена', {}).get('number', 0) > 0]
     except: 
         return []
@@ -327,7 +334,7 @@ async def get_client_orders_from_notion(client_name):
     if not notion or not NOTION_DATABASE_ID: 
         return None, "Notion не настроен"
     try:
-        res = notion.databases.query(database_id=NOTION_DATABASE_ID, sorts=[{"timestamp": "created_time", "direction": "descending"}], page_size=100)
+        res = await notion.databases.query(database_id=NOTION_DATABASE_ID, sorts=[{"timestamp": "created_time", "direction": "descending"}], page_size=100)
         client_norm = normalize_client_name(client_name).lower()
         filtered = [p for p in res.get('results', []) if p['properties'].get('Клиент', {}).get('select', {}) and normalize_client_name(p['properties']['Клиент']['select'].get('name', '')).lower() == client_norm]
         if not filtered: 
@@ -355,9 +362,9 @@ async def save_to_notion(uid):
         page_id = data.get('notion_page_id')
         
         if page_id: 
-            res = notion.pages.update(page_id=page_id, properties=properties)
+            res = await notion.pages.update(page_id=page_id, properties=properties)
         else:
-            res = notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=properties)
+            res = await notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=properties)
             orders[uid]['notion_page_id'] = res['id']
             
         return f"https://notion.so/{res['id'].replace('-', '')}"
@@ -1039,11 +1046,11 @@ async def cmd_cargo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = "Готов к расчету" if ready == total else "Ждет данных"
         keyboard.append([InlineKeyboardButton(f"📦 {draft['client']} ({ready}/{total}) - {status}", callback_data=f'cg_open_{cid}')])
 
-    msg = "📂 **Управление Карго:**\nВыберите действие:"
+    msg = "📂 <b>Управление Карго:</b>\nВыберите действие:"
     if update.message:
-        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await update.callback_query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.callback_query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
     return CG_START
 
 async def cg_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1068,16 +1075,16 @@ async def cg_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             orders[uid]['cg_missing_idx'] = missing_idx
             item_name = draft['items'][missing_idx]['name']
             kb = [[InlineKeyboardButton("🟡 Мешок ($5)", callback_data='cg_pack_sack')], [InlineKeyboardButton("📦 Уголки ($6)", callback_data='cg_pack_corners')], [InlineKeyboardButton("🪵 Обрешетка ($8)", callback_data='cg_pack_wood')], [InlineKeyboardButton("⏳ Жду данные", callback_data='cg_pack_wait')]]
-            await query.edit_message_text(f"📦 Партия **{draft['client']}**.\nВыбери тип упаковки для товара **{item_name}**:", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+            await query.edit_message_text(f"📦 Партия <b>{draft['client']}</b>.\nВыбери тип упаковки для товара <b>{item_name}</b>:", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
             return CG_PACK
         else:
             t_weight = sum(i['weight'] for i in draft['items'])
             t_vol = sum(i['dims'][0] for i in draft['items'])
             t_pieces = sum(i['pieces'] for i in draft['items'])
             density = int(t_weight / t_vol) if t_vol > 0 else 0
-            msg = f"📦 **СВОДКА ДЛЯ КАРГО ({draft['client']}):**\n• Общий вес: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces} шт\n• Плотность: {density} кг/м³"
+            msg = f"📦 <b>СВОДКА ДЛЯ КАРГО ({draft['client']}):</b>\n• Общий вес: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces} шт\n• Плотность: {density} кг/м³"
             kb = [[InlineKeyboardButton("🧮 Рассчитать Карго", callback_data='cg_calc')], [InlineKeyboardButton("➕ Добавить товар", callback_data='cg_more_yes')]]
-            await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+            await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
             return CG_MORE_ITEMS
 
 async def cg_get_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1101,7 +1108,7 @@ async def cg_get_item_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     orders[uid]['cg_missing_idx'] = len(cargo_drafts[uid][cid]['items']) - 1
 
     kb = [[InlineKeyboardButton("🟡 Мешок ($5)", callback_data='cg_pack_sack')], [InlineKeyboardButton("📦 Уголки ($6)", callback_data='cg_pack_corners')], [InlineKeyboardButton("🪵 Обрешетка ($8)", callback_data='cg_pack_wood')], [InlineKeyboardButton("⏳ Жду данные", callback_data='cg_pack_wait')]]
-    await update.message.reply_text(f"Выбери тип упаковки для товара **{name}**:", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text(f"Выбери тип упаковки для товара <b>{name}</b>:", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
     return CG_PACK
 
 async def cg_pack_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1117,8 +1124,8 @@ async def cg_pack_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'cg_pack_corners': cargo_drafts[uid][cid]['items'][idx].update({'pack_type': 'Уголки', 'pack_price': 6.0})
     elif query.data == 'cg_pack_wood': cargo_drafts[uid][cid]['items'][idx].update({'pack_type': 'Обрешетка', 'pack_price': 8.0})
 
-    msg = f"📏 Введи данные для **{cargo_drafts[uid][cid]['items'][idx]['name']}**.\n*Если коробок несколько разных, пиши каждую с новой строки.*\n\nНажми ниже, чтобы скопировать шаблон:\n`Кол-во Вес Длина Ширина Высота`"
-    await query.edit_message_text(msg, parse_mode='Markdown')
+    msg = f"📏 Введи данные для <b>{cargo_drafts[uid][cid]['items'][idx]['name']}</b>.\n<i>Если коробок несколько разных, пиши каждую с новой строки.</i>\n\nНажми ниже, чтобы скопировать шаблон:\n<code>Кол-во Вес Длина Ширина Высота</code>"
+    await query.edit_message_text(msg, parse_mode='HTML')
     return CG_DIMS
 
 async def cg_dims_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1130,12 +1137,12 @@ async def cg_dims_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not line.strip(): continue
         try:
             nums = tuple(map(float, line.replace(',', '.').split()))
-            if len(nums) < 5: return await update.message.reply_text("❌ Нужно 5 цифр: Кол-во Вес Д Ш В\nПопробуй еще раз:", parse_mode='Markdown')
+            if len(nums) < 5: return await update.message.reply_text("❌ Нужно 5 цифр: Кол-во Вес Д Ш В\nПопробуй еще раз:", parse_mode='HTML')
             p, w, l, wid, h = int(nums[0]), nums[1], nums[2], nums[3], nums[4]
             if pack_type == 'Уголки': w += 1.0
             elif pack_type == 'Обрешетка': w += 10.0; l += 5; wid += 5; h += 5
             total_pieces += p; total_weight += (p * w); total_vol += (p * (l * wid * h) / 1000000)
-        except: return await update.message.reply_text(f"❌ Ошибка в строке: `{line}`\nПопробуй еще раз:", parse_mode='Markdown')
+        except: return await update.message.reply_text(f"❌ Ошибка в строке: <code>{line}</code>\nПопробуй еще раз:", parse_mode='HTML')
 
     cargo_drafts[uid][cid]['items'][idx].update({'pieces': total_pieces, 'weight': total_weight, 'dims': (total_vol, 1, 1)})
     missing_idx = next((i for i, item in enumerate(cargo_drafts[uid][cid]['items']) if item['pieces'] == 0), -1)
@@ -1144,7 +1151,7 @@ async def cg_dims_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         orders[uid]['cg_missing_idx'] = missing_idx
         item_name = cargo_drafts[uid][cid]['items'][missing_idx]['name']
         kb = [[InlineKeyboardButton("🟡 Мешок ($5)", callback_data='cg_pack_sack')], [InlineKeyboardButton("📦 Уголки ($6)", callback_data='cg_pack_corners')], [InlineKeyboardButton("🪵 Обрешетка ($8)", callback_data='cg_pack_wood')], [InlineKeyboardButton("⏳ Жду данные", callback_data='cg_pack_wait')]]
-        await update.message.reply_text(f"Выбери тип упаковки для товара **{item_name}**:", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+        await update.message.reply_text(f"Выбери тип упаковки для товара <b>{item_name}</b>:", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
         return CG_PACK
 
     kb = [[InlineKeyboardButton("➕ Добавить еще товар", callback_data='cg_more_yes')], [InlineKeyboardButton("🧮 Рассчитать Карго", callback_data='cg_calc')], [InlineKeyboardButton("💾 В черновики", callback_data='cg_more_draft')]]
@@ -1174,9 +1181,9 @@ async def cg_more_items_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t_vol = sum(i['dims'][0] for i in draft['items'])
         t_pieces = sum(i['pieces'] for i in draft['items'])
         density = int(t_weight / t_vol) if t_vol > 0 else 0
-        msg = f"📦 **СВОДКА ДЛЯ КАРГО:**\n• Общий вес: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces}\n• Плотность: {density} кг/м³\n\n*Скинь это менеджеру Карго, чтобы узнать тариф.*"
-        await query.edit_message_text(msg, parse_mode='Markdown')
-        await query.message.reply_text("1️⃣ Введи **Тариф Карго** (твоя себестоимость, $/кг):", parse_mode='Markdown')
+        msg = f"📦 <b>СВОДКА ДЛЯ КАРГО:</b>\n• Общий вес: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces}\n• Плотность: {density} кг/м³\n\n<i>Скинь это менеджеру Карго, чтобы узнать тариф.</i>"
+        await query.edit_message_text(msg, parse_mode='HTML')
+        await query.message.reply_text("1️⃣ Введи <b>Тариф Карго</b> (твоя себестоимость, $/кг):", parse_mode='HTML')
         return CG_T_CARGO
 
 async def cg_t_cargo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1225,12 +1232,12 @@ async def cg_r_amd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     draft.update({'t_weight': t_weight, 't_vol': t_vol, 't_pieces': t_pieces, 'density': int(t_weight/t_vol) if t_vol>0 else 0, 'tc': orders[uid]['cg_tc'], 'tcl': orders[uid]['cg_tcl'], 'rcny': orders[uid]['cg_rcny'], 'ramd': orders[uid]['cg_ramd'], 'client_amd': client_total_amd, 'cargo_cny': cargo_total_cny, 'profit_amd': profit_amd})
 
-    msg_client = f"🚛 **CARGO INVOICE: {draft['client'].upper()}**\n🏷 {draft['label']}\n\n**ПАРАМЕТРЫ ГРУЗА:**\n• Вес брутто: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces} шт\n\n**РАСЧЕТ СТОИМОСТИ:**\n• Доставка ({t_weight} кг × ${orders[uid]['cg_tcl']}): ${client_weight_usd:.1f}\n• Упаковка и выгрузка: ${pack_cost + unload_cost:.1f}\n\n💵 Итого логистика: ${client_total_usd:.1f}\n🔄 Конвертация: ${client_total_usd:.1f} × {orders[uid]['cg_rcny']} ¥ × {orders[uid]['cg_ramd']} AMD\n✅ **К ОПЛАТЕ: {client_total_amd:,} AMD**"
-    await update.message.reply_text(msg_client, parse_mode='Markdown')
+    msg_client = f"🚛 <b>CARGO INVOICE: {draft['client'].upper()}</b>\n🏷 {draft['label']}\n\n<b>ПАРАМЕТРЫ ГРУЗА:</b>\n• Вес брутто: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces} шт\n\n<b>РАСЧЕТ СТОИМОСТИ:</b>\n• Доставка ({t_weight} кг × ${orders[uid]['cg_tcl']}): ${client_weight_usd:.1f}\n• Упаковка и выгрузка: ${pack_cost + unload_cost:.1f}\n\n💵 Итого логистика: ${client_total_usd:.1f}\n🔄 Конвертация: ${client_total_usd:.1f} × {orders[uid]['cg_rcny']} ¥ × {orders[uid]['cg_ramd']} AMD\n✅ <b>К ОПЛАТЕ: {client_total_amd:,} AMD</b>"
+    await update.message.reply_text(msg_client, parse_mode='HTML')
 
-    msg_admin = f"💼 **ВНУТРЕННИЙ РАСЧЕТ ({cid}):**\n\n**1. ОТДАЕМ В КАРГО:**\n• Себестоимость (${orders[uid]['cg_tc']}/кг + Услуги): **${cargo_total_usd:.1f}**\n🇨🇳 **Перевести Карго: {cargo_total_cny:,} ¥** *(по курсу {orders[uid]['cg_rcny']})*\n\n**2. ПРИБЫЛЬ:**\n💰 **ЧИСТАЯ ПРИБЫЛЬ: {profit_amd:,} AMD**"
+    msg_admin = f"💼 <b>ВНУТРЕННИЙ РАСЧЕТ ({cid}):</b>\n\n<b>1. ОТДАЕМ В КАРГО:</b>\n• Себестоимость (${orders[uid]['cg_tc']}/кг + Услуги): <b>${cargo_total_usd:.1f}</b>\n🇨🇳 <b>Перевести Карго: {cargo_total_cny:,} ¥</b> <i>(по курсу {orders[uid]['cg_rcny']})</i>\n\n<b>2. ПРИБЫЛЬ:</b>\n💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {profit_amd:,} AMD</b>"
     kb = [[InlineKeyboardButton("📊 Export Excel", callback_data='cg_export_ex')], [InlineKeyboardButton("📑 Export Airtable", callback_data='cg_export_air')], [InlineKeyboardButton("🗑 Завершить и удалить", callback_data='cg_delete')]]
-    await update.message.reply_text(msg_admin, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text(msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
     return ConversationHandler.END
 
 
@@ -1268,7 +1275,7 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cid = orders[uid].get('active_cargo_id')
         draft = cargo_drafts[uid][cid]
         export_text = f"AIRTABLE_EXPORT_START\nParty_ID: {cid}\nDate: {datetime.now().strftime('%d.%m.%Y')}\nTotal_Weight_KG: {draft['t_weight']}\nTotal_Volume_CBM: {draft['t_vol']:.2f}\nTotal_Pieces: {draft['t_pieces']}\nDensity: {draft['density']}\nPackaging_Type: Сборная\nTariff_Cargo_USD: {draft['tc']}\nTariff_Client_USD: {draft['tcl']}\nRate_USD_CNY: {draft['rcny']}\nRate_USD_AMD: {draft['ramd']}\nTotal_Client_AMD: {draft['client_amd']}\nTotal_Cargo_CNY: {draft['cargo_cny']}\nNet_Profit_AMD: {draft['profit_amd']}\nAIRTABLE_EXPORT_END"
-        await query.message.reply_text(f"```text\n{export_text}\n```", parse_mode='Markdown')
+        await query.message.reply_text(f"<code>{export_text}</code>", parse_mode='HTML')
         
     elif query.data == 'cg_export_ex':
         cid = orders[uid].get('active_cargo_id')
@@ -1326,7 +1333,7 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = orders.get(uid, {})
         destinations = ", ".join([w['city'] for w in data.get('dn_wh_list', [])])
         export_text = f"AIRTABLE_DOSTAVKA_START\nClient_ID: {data.get('dn_client', 'Unknown')}\nDate: {datetime.now().strftime('%d.%m.%Y')}\nTotal_Boxes: {data.get('dn_total_boxes', 0)}\nDestinations: {destinations}\nLogistics_RUB: {data.get('dn_total_rub', 0)}\nRate_RUB_AMD: {data.get('dn_rate', 0)}\nTotal_Client_AMD: {data.get('dn_total_amd', 0)}\nAIRTABLE_DOSTAVKA_END"
-        await query.message.reply_text(f"```text\n{export_text}\n```", parse_mode='Markdown')
+        await query.message.reply_text(f"<code>{export_text}</code>", parse_mode='HTML')
 
     elif query.data == 'dn_delete':
         await query.edit_message_text(f"{query.message.text}\n\n✅ Расчет отменен и удален.")
@@ -1334,12 +1341,12 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ======== MAIN ========
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_error_handler(global_error_handler)
     
     app.add_handler(CommandHandler('start', cmd_menu))
     app.add_handler(CommandHandler('menu', cmd_menu))
     app.add_handler(CommandHandler('cancel', cancel))
     
-    # Супер-сканер: ловит текст с /audit-gs в любом виде, обходит запрет Телеграма на дефисы
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(re.compile(r'/audit[-_]gs', re.IGNORECASE)), cmd_audit_gs))
     
     app.add_handler(CallbackQueryHandler(guide_open, pattern='^guide_open$'))
@@ -1431,7 +1438,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$|^dn_export_airtable$'))
     
-    logger.info("Бот запущен. Версия v77 (CLEAN AUDIT-GS PARSER)")
+    logger.info("Бот запущен. Версия v78 (NO-FREEZE NOTION & CLEAN CARGO HTML)")
     app.run_polling()
 
 if __name__ == '__main__': 
