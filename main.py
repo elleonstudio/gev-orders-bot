@@ -756,7 +756,6 @@ def generate_dn_warehouse_keyboard():
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
-# Точка входа для /dostavka_new (без привязки)
 async def cmd_dostavka_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     orders[uid] = orders.get(uid, {})
@@ -771,7 +770,6 @@ async def dn_get_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Выбери склад РФ для отправки:", reply_markup=generate_dn_warehouse_keyboard())
     return DN_WH
 
-# Точка входа для /dostavka (с привязкой к /zakaz или /paste)
 async def cmd_dostavka(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     if uid not in orders or 'client' not in orders[uid]: 
@@ -1206,9 +1204,21 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == 'dn_export_ex':
         items_data = []
-        for w in orders[uid]['dn_wh_list']: 
-            desc = f"Доставка на склад: {w['city']} (Паллет: {w['pallets']}, Короб: {w['rem_boxes']})"
-            items_data.append({"Описание услуги": desc, "Количество": f"{w['total_boxes']} шт", "Тариф (RUB)": "-", "Сумма (RUB)": f"{w['cost']} ₽"})
+        for w in orders[uid]['dn_wh_list']:
+            if w['pallets'] > 0:
+                items_data.append({
+                    "Описание услуги": f"Доставка на склад: {w['city']} (Паллеты)", 
+                    "Количество": f"{w['pallets']} шт", 
+                    "Тариф (RUB)": f"{w['pallet_price']} ₽", 
+                    "Сумма (RUB)": f"{w['pallets'] * w['pallet_price']} ₽"
+                })
+            if w['rem_boxes'] > 0:
+                items_data.append({
+                    "Описание услуги": f"Доставка на склад: {w['city']} (Короба)", 
+                    "Количество": f"{w['rem_boxes']} шт", 
+                    "Тариф (RUB)": f"{w['box_price']} ₽", 
+                    "Сумма (RUB)": f"{w['rem_boxes'] * w['box_price']} ₽"
+                })
             
         items_data.append({"Описание услуги": "Приемка товара коробами", "Количество": f"{orders[uid]['dn_total_boxes']} шт", "Тариф (RUB)": "100 ₽", "Сумма (RUB)": f"{orders[uid]['dn_total_boxes']*100} ₽"})
         items_data.append({"Описание услуги": "Разбор коробов", "Количество": f"{orders[uid]['dn_total_boxes']} шт", "Тариф (RUB)": "50 ₽", "Сумма (RUB)": f"{orders[uid]['dn_total_boxes']*50} ₽"})
@@ -1224,13 +1234,17 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False, sheet_name='Dostavka_Invoice')
-            writer.sheets['Dostavka_Invoice'].set_column('A:A', 35)
+            writer.sheets['Dostavka_Invoice'].set_column('A:A', 40)
             writer.sheets['Dostavka_Invoice'].set_column('B:D', 18)
         output.seek(0)
         await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(output, filename=f"Dostavka_{orders[uid]['dn_client']}.xlsx"))
 
     elif query.data == 'dn_delete':
         await query.edit_message_text(f"{query.message.text}\n\n✅ Расчет отменен и удален.")
+
+def cancel(update, context): 
+    update.message.reply_text("Действие отменено.")
+    return ConversationHandler.END
 
 # ======== MAIN ========
 def main():
@@ -1333,7 +1347,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$'))
     
-    logger.info("Бот запущен. Версия v68 (SMART DOSTAVKA X2)")
+    logger.info("Бот запущен. Версия v69 (EXCEL TARIFF FIX)")
     app.run_polling()
 
 if __name__ == '__main__': 
