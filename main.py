@@ -224,6 +224,7 @@ async def cmd_audit_gs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"• Курс: {client_rate}\n\n"
         msg += f"✅ <b>ИТОГО К ОПЛАТЕ: {final_total_amd:,} AMD</b>"
         
+        # Отправляем ЕДИНСТВЕННОЕ сообщение без кнопок
         await update.message.reply_text(msg, parse_mode='HTML')
         
     except Exception as e:
@@ -1080,7 +1081,7 @@ async def cg_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             t_weight = sum(i['weight'] for i in draft['items'])
             t_vol = sum(i['dims'][0] for i in draft['items'])
             t_pieces = sum(i['pieces'] for i in draft['items'])
-            density = int(t_weight / t_vol) if t_vol > 0 else 0
+            density = round(t_weight / t_vol, 2) if t_vol > 0 else 0
             msg = f"📦 <b>СВОДКА ДЛЯ КАРГО ({draft['client']}):</b>\n• Общий вес: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces} шт\n• Плотность: {density} кг/м³"
             kb = [[InlineKeyboardButton("🧮 Рассчитать Карго", callback_data='cg_calc')], [InlineKeyboardButton("➕ Добавить товар", callback_data='cg_more_yes')]]
             await query.edit_message_text(msg, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
@@ -1123,7 +1124,7 @@ async def cg_pack_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'cg_pack_corners': cargo_drafts[uid][cid]['items'][idx].update({'pack_type': 'Уголки', 'pack_price': 6.0})
     elif query.data == 'cg_pack_wood': cargo_drafts[uid][cid]['items'][idx].update({'pack_type': 'Обрешетка', 'pack_price': 8.0})
 
-    msg = f"📏 Введи данные для <b>{cargo_drafts[uid][cid]['items'][idx]['name']}</b>.\n<i>Если коробок несколько разных, пиши каждую с новой строки.</i>\n\nНажми ниже, чтобы скопировать шаблон:\n<code>Кол-во Вес Длина Ширина Высота</code>"
+    msg = f"📏 Введи данные для <b>{cargo_drafts[uid][cid]['items'][idx]['name']}</b>.\n<i>Если коробок несколько разных, пиши каждую с новой строки.</i>\n\nНажми ниже, чтобы скопировать шаблон:\n<code>Кол-во_МЕСТ Вес_1_МЕСТА Длина Ширина Высота</code>"
     await query.edit_message_text(msg, parse_mode='HTML')
     return CG_DIMS
 
@@ -1137,7 +1138,7 @@ async def cg_dims_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             nums = tuple(map(float, line.replace(',', '.').split()))
             if len(nums) < 5: 
-                await update.message.reply_text("❌ Нужно 5 цифр: Кол-во Вес Д Ш В\nПопробуй еще раз:", parse_mode='HTML')
+                await update.message.reply_text("❌ Нужно 5 цифр: Кол-во_МЕСТ Вес_1_МЕСТА Д Ш В\nПопробуй еще раз:", parse_mode='HTML')
                 return CG_DIMS
             p, w, l, wid, h = int(nums[0]), nums[1], nums[2], nums[3], nums[4]
             if pack_type == 'Уголки': w += 1.0
@@ -1183,7 +1184,7 @@ async def cg_more_items_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t_weight = sum(i['weight'] for i in draft['items'])
         t_vol = sum(i['dims'][0] for i in draft['items'])
         t_pieces = sum(i['pieces'] for i in draft['items'])
-        density = int(t_weight / t_vol) if t_vol > 0 else 0
+        density = round(t_weight / t_vol, 2) if t_vol > 0 else 0
         msg = f"📦 <b>СВОДКА ДЛЯ КАРГО:</b>\n• Общий вес: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces}\n• Плотность: {density} кг/м³\n\n<i>Скинь это менеджеру Карго, чтобы узнать тариф.</i>"
         await query.edit_message_text(msg, parse_mode='HTML')
         await query.message.reply_text("1️⃣ Введи <b>Тариф Карго</b> (твоя себестоимость, $/кг):", parse_mode='HTML')
@@ -1241,7 +1242,8 @@ async def cg_r_amd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     profit_amd = client_total_amd - int(cargo_total_cny * orders[uid]['cg_ramd'])
 
-    draft.update({'t_weight': t_weight, 't_vol': t_vol, 't_pieces': t_pieces, 'density': int(t_weight/t_vol) if t_vol>0 else 0, 'tc': orders[uid]['cg_tc'], 'tcl': orders[uid]['cg_tcl'], 'rcny': orders[uid]['cg_rcny'], 'ramd': orders[uid]['cg_ramd'], 'client_amd': client_total_amd, 'cargo_cny': cargo_total_cny, 'profit_amd': profit_amd})
+    density = round(t_weight / t_vol, 2) if t_vol > 0 else 0
+    draft.update({'t_weight': t_weight, 't_vol': t_vol, 't_pieces': t_pieces, 'density': density, 'tc': orders[uid]['cg_tc'], 'tcl': orders[uid]['cg_tcl'], 'rcny': orders[uid]['cg_rcny'], 'ramd': orders[uid]['cg_ramd'], 'client_amd': client_total_amd, 'cargo_cny': cargo_total_cny, 'profit_amd': profit_amd})
 
     msg_client = f"🚛 <b>CARGO INVOICE: {draft['client'].upper()}</b>\n🏷 {draft['label']}\n\n<b>ПАРАМЕТРЫ ГРУЗА:</b>\n• Вес брутто: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces} шт\n\n<b>РАСЧЕТ СТОИМОСТИ:</b>\n• Доставка ({t_weight} кг × ${orders[uid]['cg_tcl']}): ${client_weight_usd:.1f}\n• Упаковка и выгрузка: ${pack_cost + unload_cost:.1f}\n\n💵 Итого логистика: ${client_total_usd:.1f}\n🔄 Конвертация: ${client_total_usd:.1f} × {orders[uid]['cg_rcny']} ¥ × {orders[uid]['cg_ramd']} AMD\n✅ <b>К ОПЛАТЕ: {client_total_amd:,} AMD</b>"
     await update.message.reply_text(msg_client, parse_mode='HTML')
@@ -1449,7 +1451,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$|^dn_export_airtable$'))
     
-    logger.info("Бот запущен. Версия v79 (CARGO DIMS BUG & DOUBLE INSTANCE FIXED)")
+    logger.info("Бот запущен. Версия v80 (CARGO DENSITY ROUNDING & TEMPLATE FIX)")
     app.run_polling()
 
 if __name__ == '__main__': 
