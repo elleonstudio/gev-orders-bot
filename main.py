@@ -907,11 +907,15 @@ async def dn_get_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if orders[uid].get('is_linked_dostavka'):
         kb = [
             [InlineKeyboardButton("🚚 Excel Доставка", callback_data='dn_export_ex'), InlineKeyboardButton("📊 Excel Товары", callback_data='gen_excel')],
-            [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')],
+            [InlineKeyboardButton("📑 Airtable Товары", callback_data='export_airtable'), InlineKeyboardButton("📑 Airtable Доставка", callback_data='dn_export_airtable')],
             [InlineKeyboardButton("💾 Обновить Notion", callback_data='paste_save_direct')]
         ]
     else:
-        kb = [[InlineKeyboardButton("📊 Export Excel", callback_data='dn_export_ex')], [InlineKeyboardButton("🗑 Отменить / Удалить", callback_data='dn_delete')]]
+        kb = [
+            [InlineKeyboardButton("📊 Export Excel", callback_data='dn_export_ex')],
+            [InlineKeyboardButton("📑 Export Airtable", callback_data='dn_export_airtable')],
+            [InlineKeyboardButton("🗑 Отменить / Удалить", callback_data='dn_delete')]
+        ]
         
     await update.message.reply_text(msg_client, reply_markup=InlineKeyboardMarkup(kb))
     return ConversationHandler.END
@@ -1215,6 +1219,12 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         output.seek(0)
         await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(output, filename=f"Dostavka_{orders[uid]['dn_client']}.xlsx"))
 
+    elif query.data == 'dn_export_airtable':
+        data = orders.get(uid, {})
+        destinations = ", ".join([w['city'] for w in data.get('dn_wh_list', [])])
+        export_text = f"AIRTABLE_DOSTAVKA_START\nClient_ID: {data.get('dn_client', 'Unknown')}\nDate: {datetime.now().strftime('%d.%m.%Y')}\nTotal_Boxes: {data.get('dn_total_boxes', 0)}\nDestinations: {destinations}\nLogistics_RUB: {data.get('dn_total_rub', 0)}\nRate_RUB_AMD: {data.get('dn_rate', 0)}\nTotal_Client_AMD: {data.get('dn_total_amd', 0)}\nAIRTABLE_DOSTAVKA_END"
+        await query.message.reply_text(f"```text\n{export_text}\n```", parse_mode='Markdown')
+
     elif query.data == 'dn_delete':
         await query.edit_message_text(f"{query.message.text}\n\n✅ Расчет отменен и удален.")
 
@@ -1312,9 +1322,9 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
     
-    app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$'))
+    app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$|^dn_export_airtable$'))
     
-    logger.info("Бот запущен. Версия v71 (INTERACTIVE CARGO FIXED)")
+    logger.info("Бот запущен. Версия v73 (AIRTABLE FIXED)")
     app.run_polling()
 
 if __name__ == '__main__': 
