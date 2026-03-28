@@ -110,7 +110,7 @@ async def guide_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Запускается после выкупа. Распределяет товары по коробкам (до 30 кг в одной).
 
 <b>4. Логистика Карго (/cargo)</b>
-Напишите <code>/cargo</code>. Считает прибыль между тарифами, накидывает вес упаковки (+1 кг картон, +10 кг дерево). Поддерживает сохранение в черновики.
+Напишите <code>/cargo</code>. Считает прибыль между тарифами, накидывает вес упаковки (+1 кг картон, +10 кг дерево).
 
 <b>5. Доставка по РФ (/dostavka и /dostavka_new)</b>
 • <code>/dostavka</code> — продолжает работу с текущим просчитанным клиентом (после /zakaz или /paste). Дает кнопки для обновления Notion и общего инвойса.
@@ -916,242 +916,216 @@ async def dn_get_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg_client, reply_markup=InlineKeyboardMarkup(kb))
     return ConversationHandler.END
 
-# ======== ЛОГИКА /CARGO ========
-CG_PACK, CG_DIMS, CG_T_CARGO, CG_T_CLIENT, CG_R_CNY, CG_R_AMD = range(60, 66)
 
-def parse_cargo_text(text):
-    data = {'client': 'Unknown', 'label': 'Без метки', 'items': []}
-    current_item = None
-    for line in text.split('\n'):
-        l = line.strip()
-        if not l: continue
-        ll = l.lower()
-        if 'клиент:' in ll: 
-            data['client'] = normalize_client_name(l.split(':', 1)[1])
-        elif 'метка:' in ll: 
-            data['label'] = l.split(':', 1)[1].strip()
-        elif 'товар' in ll:
-            if current_item: data['items'].append(current_item)
-            current_item = {'name': 'Товар', 'pieces': 0, 'weight': 0.0, 'dims': (0,0,0), 'pack_type': None, 'pack_price': 0.0}
-        elif 'название:' in ll and current_item is not None:
-            current_item['name'] = l.split(':', 1)[1].strip().title()
-    if current_item: 
-        data['items'].append(current_item)
-    return data
+# ======== ИНТЕРАКТИВНОЕ УПРАВЛЕНИЕ КАРГО (/CARGO) ========
+CG_START, CG_CLIENT, CG_LABEL, CG_ITEM_NAME, CG_PACK, CG_DIMS, CG_MORE_ITEMS, CG_T_CARGO, CG_T_CLIENT, CG_R_CNY, CG_R_AMD = range(80, 91)
 
 async def cmd_cargo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    text = update.message.text.replace('/cargo', '').strip()
-    if uid not in cargo_drafts: 
-        cargo_drafts[uid] = {}
+    if uid not in cargo_drafts: cargo_drafts[uid] = {}
+    active_parties = cargo_drafts[uid]
 
-    if not text:
-        active_parties = cargo_drafts[uid]
-        if not active_parties: 
-            return await update.message.reply_text("📂 Активных партий Карго нет. Чтобы создать, напиши /cargo и список товаров.")
-            
-        msg = "📂 **Ваши активные партии в Китае:**\n\n"
-        keyboard = []
-        for cid, draft in active_parties.items():
-            ready = sum(1 for i in draft['items'] if i['pieces'] > 0)
-            total = len(draft['items'])
-            status = "Готов к расчету" if ready == total else "Ждет данных"
-            keyboard.append([InlineKeyboardButton(f"📦 {draft['client']} ({ready}/{total}) - {status}", callback_data=f'cg_open_{cid}')])
-        return await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton("➕ Создать новую партию", callback_data='cg_new_draft')]]
+    for cid, draft in active_parties.items():
+        ready = sum(1 for i in draft['items'] if i['pieces'] > 0)
+        total = len(draft['items'])
+        status = "Готов к расчету" if ready == total else "Ждет данных"
+        keyboard.append([InlineKeyboardButton(f"📦 {draft['client']} ({ready}/{total}) - {status}", callback_data=f'cg_open_{cid}')])
 
-    data = parse_cargo_text(text)
-    if not data['items']: 
-        return await update.message.reply_text("❌ Ошибка: товары не найдены. Используй шаблон.")
-    
-    cargo_id = generate_cargo_id()
-    data['cargo_id'] = cargo_id
-    cargo_drafts[uid][cargo_id] = data
-    total = len(data['items'])
-    await update.message.reply_text(f"💾 **Партия {cargo_id} сохранена!**\n👤 Клиент: {data['client']}\n🏷 Метка: {data['label']}\n\n⚠️ Ожидаем габариты для {total} позиций.", parse_mode='Markdown')
-
-async def cg_open_draft(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = str(update.effective_user.id)
-    cid = query.data.replace('cg_open_', '')
-    draft = cargo_drafts[uid].get(cid)
-    
-    if not draft: 
-        return await query.message.reply_text("❌ Партия не найдена.")
-        
-    orders[uid] = orders.get(uid, {})
-    orders[uid]['active_cargo_id'] = cid
-    
-    ready = sum(1 for i in draft['items'] if i['pieces'] > 0)
-    total = len(draft['items'])
-    
-    if ready < total:
-        missing_names = [i['name'] for i in draft['items'] if i['pieces'] == 0]
-        msg = f"📦 **Партия {cid} ({draft['client']})**\n\nГотово к расчету: {ready}/{total}.\nОжидаем данные для:\n- " + "\n- ".join(missing_names)
-        await query.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✍️ Дополнить данные", callback_data='cg_fill')]]))
+    msg = "📂 **Управление Карго:**\nВыберите действие:"
+    if update.message:
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        t_weight = sum(i['weight'] for i in draft['items'])
-        t_vol = sum(i['pieces'] * (i['dims'][0]*i['dims'][1]*i['dims'][2])/1000000 for i in draft['items'])
-        t_pieces = sum(i['pieces'] for i in draft['items'])
-        density = int(t_weight / t_vol) if t_vol > 0 else 0
-        
-        msg = f"📦 **СВОДКА ДЛЯ КАРГО ({draft['client']}):**\n• Общий вес: {t_weight} кг\n• Общий объем: {t_vol:.2f} м³\n• Мест: {t_pieces}\n• Плотность: {density} кг/м³"
-        await query.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🧮 Ввести тарифы", callback_data='cg_calc')]]))
+        await update.callback_query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    return CG_START
 
-async def cg_fill_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = str(update.effective_user.id)
-    cid = orders[uid]['active_cargo_id']
-    draft = cargo_drafts[uid][cid]
+async def cg_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
     
-    missing_idx = next((idx for idx, item in enumerate(draft['items']) if item['pieces'] == 0), -1)
-    if missing_idx == -1: 
-        return await query.message.reply_text("✅ Все данные заполнены! Открой партию заново.")
-        
-    orders[uid]['cg_missing_idx'] = missing_idx
-    item_name = draft['items'][missing_idx]['name']
-    
-    kb = [[InlineKeyboardButton("🟡 Мешок ($5)", callback_data='cg_pack_sack')], [InlineKeyboardButton("📦 Уголки ($6)", callback_data='cg_pack_corners')], [InlineKeyboardButton("🪵 Обрешетка ($8)", callback_data='cg_pack_wood')]]
-    await query.message.reply_text(f"Выбери тип упаковки для **{item_name}**:", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+    if query.data == 'cg_new_draft':
+        await query.edit_message_text("👤 Напиши имя клиента (например: Zaven8291):")
+        return CG_CLIENT
+
+    elif query.data.startswith('cg_open_'):
+        cid = query.data.replace('cg_open_', '')
+        draft = cargo_drafts[uid].get(cid)
+        if not draft:
+            await query.edit_message_text("❌ Партия не найдена.")
+            return ConversationHandler.END
+
+        orders[uid] = orders.get(uid, {})
+        orders[uid]['active_cargo_id'] = cid
+
+        missing_idx = next((i for i, item in enumerate(draft['items']) if item['pieces'] == 0), -1)
+        if missing_idx != -1:
+            orders[uid]['cg_missing_idx'] = missing_idx
+            item_name = draft['items'][missing_idx]['name']
+            kb = [[InlineKeyboardButton("🟡 Мешок ($5)", callback_data='cg_pack_sack')], [InlineKeyboardButton("📦 Уголки ($6)", callback_data='cg_pack_corners')], [InlineKeyboardButton("🪵 Обрешетка ($8)", callback_data='cg_pack_wood')], [InlineKeyboardButton("⏳ Жду данные", callback_data='cg_pack_wait')]]
+            await query.edit_message_text(f"📦 Партия **{draft['client']}**.\nВыбери тип упаковки для товара **{item_name}**:", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+            return CG_PACK
+        else:
+            t_weight = sum(i['weight'] for i in draft['items'])
+            t_vol = sum(i['dims'][0] for i in draft['items'])
+            t_pieces = sum(i['pieces'] for i in draft['items'])
+            density = int(t_weight / t_vol) if t_vol > 0 else 0
+            msg = f"📦 **СВОДКА ДЛЯ КАРГО ({draft['client']}):**\n• Общий вес: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces} шт\n• Плотность: {density} кг/м³"
+            kb = [[InlineKeyboardButton("🧮 Рассчитать Карго", callback_data='cg_calc')], [InlineKeyboardButton("➕ Добавить товар", callback_data='cg_more_yes')]]
+            await query.edit_message_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+            return CG_MORE_ITEMS
+
+async def cg_get_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id); orders[uid] = orders.get(uid, {})
+    orders[uid]['cg_temp_client'] = normalize_client_name(update.message.text)
+    await update.message.reply_text("🏷 Напиши метку для груза (например: Одежда и пластик):")
+    return CG_LABEL
+
+async def cg_get_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id); client = orders[uid]['cg_temp_client']
+    label = update.message.text.strip(); cid = generate_cargo_id()
+    cargo_drafts[uid][cid] = {'cargo_id': cid, 'client': client, 'label': label, 'items': []}
+    orders[uid]['active_cargo_id'] = cid
+    await update.message.reply_text("📦 Отлично! Напиши название ПЕРВОГО товара:")
+    return CG_ITEM_NAME
+
+async def cg_get_item_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = str(update.effective_user.id); cid = orders[uid]['active_cargo_id']
+    name = update.message.text.strip().title()
+    cargo_drafts[uid][cid]['items'].append({'name': name, 'pieces': 0, 'weight': 0.0, 'dims': (0,0,0), 'pack_type': None, 'pack_price': 0.0})
+    orders[uid]['cg_missing_idx'] = len(cargo_drafts[uid][cid]['items']) - 1
+
+    kb = [[InlineKeyboardButton("🟡 Мешок ($5)", callback_data='cg_pack_sack')], [InlineKeyboardButton("📦 Уголки ($6)", callback_data='cg_pack_corners')], [InlineKeyboardButton("🪵 Обрешетка ($8)", callback_data='cg_pack_wood')], [InlineKeyboardButton("⏳ Жду данные", callback_data='cg_pack_wait')]]
+    await update.message.reply_text(f"Выбери тип упаковки для товара **{name}**:", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
     return CG_PACK
 
 async def cg_pack_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = str(update.effective_user.id)
-    idx = orders[uid]['cg_missing_idx']
-    cid = orders[uid]['active_cargo_id']
-    
-    if query.data == 'cg_pack_sack': 
-        cargo_drafts[uid][cid]['items'][idx].update({'pack_type': 'Мешок', 'pack_price': 5.0})
-    elif query.data == 'cg_pack_corners': 
-        cargo_drafts[uid][cid]['items'][idx].update({'pack_type': 'Уголки', 'pack_price': 6.0})
-    elif query.data == 'cg_pack_wood': 
-        cargo_drafts[uid][cid]['items'][idx].update({'pack_type': 'Обрешетка', 'pack_price': 8.0})
-    
+    query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
+    idx = orders[uid]['cg_missing_idx']; cid = orders[uid]['active_cargo_id']
+
+    if query.data == 'cg_pack_wait':
+        kb = [[InlineKeyboardButton("➕ Добавить еще товар", callback_data='cg_more_yes')], [InlineKeyboardButton("💾 В черновики", callback_data='cg_more_draft')]]
+        await query.edit_message_text(f"⏳ Товар сохранен без габаритов. Что дальше?", reply_markup=InlineKeyboardMarkup(kb))
+        return CG_MORE_ITEMS
+
+    if query.data == 'cg_pack_sack': cargo_drafts[uid][cid]['items'][idx].update({'pack_type': 'Мешок', 'pack_price': 5.0})
+    elif query.data == 'cg_pack_corners': cargo_drafts[uid][cid]['items'][idx].update({'pack_type': 'Уголки', 'pack_price': 6.0})
+    elif query.data == 'cg_pack_wood': cargo_drafts[uid][cid]['items'][idx].update({'pack_type': 'Обрешетка', 'pack_price': 8.0})
+
     msg = f"📏 Введи данные для **{cargo_drafts[uid][cid]['items'][idx]['name']}**.\n*Если коробок несколько разных, пиши каждую с новой строки.*\n\nНажми ниже, чтобы скопировать шаблон:\n`Кол-во Вес Длина Ширина Высота`"
-    await query.message.reply_text(msg, parse_mode='Markdown')
+    await query.edit_message_text(msg, parse_mode='Markdown')
     return CG_DIMS
 
 async def cg_dims_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    cid = orders[uid]['active_cargo_id']
-    idx = orders[uid]['cg_missing_idx']
+    uid = str(update.effective_user.id); cid = orders[uid]['active_cargo_id']; idx = orders[uid]['cg_missing_idx']
     pack_type = cargo_drafts[uid][cid]['items'][idx]['pack_type']
-    
-    total_pieces = 0
-    total_weight = 0.0
-    total_vol = 0.0
-    
+
+    total_pieces = 0; total_weight = 0.0; total_vol = 0.0
     for line in update.message.text.split('\n'):
-        if not line.strip(): 
-            continue
+        if not line.strip(): continue
         try:
             nums = tuple(map(float, line.replace(',', '.').split()))
-            if len(nums) < 5: 
-                return await update.message.reply_text(f"❌ Ошибка в строке: `{line}`. Нужно 5 цифр: Кол-во Вес Д Ш В", parse_mode='Markdown')
-            
+            if len(nums) < 5: return await update.message.reply_text("❌ Нужно 5 цифр: Кол-во Вес Д Ш В\nПопробуй еще раз:", parse_mode='Markdown')
             p, w, l, wid, h = int(nums[0]), nums[1], nums[2], nums[3], nums[4]
-            
-            if pack_type == 'Уголки': 
-                w += 1.0
-            elif pack_type == 'Обрешетка': 
-                w += 10.0
-                l += 5
-                wid += 5
-                h += 5
-                
-            total_pieces += p
-            total_weight += (p * w)
-            total_vol += (p * (l * wid * h) / 1000000)
-            
-        except: 
-            return await update.message.reply_text(f"❌ Ошибка чтения строки: `{line}`", parse_mode='Markdown')
-        
+            if pack_type == 'Уголки': w += 1.0
+            elif pack_type == 'Обрешетка': w += 10.0; l += 5; wid += 5; h += 5
+            total_pieces += p; total_weight += (p * w); total_vol += (p * (l * wid * h) / 1000000)
+        except: return await update.message.reply_text(f"❌ Ошибка в строке: `{line}`\nПопробуй еще раз:", parse_mode='Markdown')
+
     cargo_drafts[uid][cid]['items'][idx].update({'pieces': total_pieces, 'weight': total_weight, 'dims': (total_vol, 1, 1)})
-    
     missing_idx = next((i for i, item in enumerate(cargo_drafts[uid][cid]['items']) if item['pieces'] == 0), -1)
-    if missing_idx == -1: 
-        await update.message.reply_text("✅ Все габариты заполнены! Открой /cargo для сводки.")
+
+    if missing_idx != -1:
+        orders[uid]['cg_missing_idx'] = missing_idx
+        item_name = cargo_drafts[uid][cid]['items'][missing_idx]['name']
+        kb = [[InlineKeyboardButton("🟡 Мешок ($5)", callback_data='cg_pack_sack')], [InlineKeyboardButton("📦 Уголки ($6)", callback_data='cg_pack_corners')], [InlineKeyboardButton("🪵 Обрешетка ($8)", callback_data='cg_pack_wood')], [InlineKeyboardButton("⏳ Жду данные", callback_data='cg_pack_wait')]]
+        await update.message.reply_text(f"Выбери тип упаковки для товара **{item_name}**:", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+        return CG_PACK
+
+    kb = [[InlineKeyboardButton("➕ Добавить еще товар", callback_data='cg_more_yes')], [InlineKeyboardButton("🧮 Рассчитать Карго", callback_data='cg_calc')], [InlineKeyboardButton("💾 В черновики", callback_data='cg_more_draft')]]
+    await update.message.reply_text("✅ Товар добавлен! Что делаем дальше?", reply_markup=InlineKeyboardMarkup(kb))
+    return CG_MORE_ITEMS
+
+async def cg_more_items_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; await query.answer(); uid = str(update.effective_user.id)
+    
+    if query.data == 'cg_more_yes':
+        await query.edit_message_text("📦 Напиши название СЛЕДУЮЩЕГО товара:")
+        return CG_ITEM_NAME
+        
+    elif query.data == 'cg_more_draft':
+        await query.edit_message_text("💾 Сохранено в черновики. Возвращайтесь, когда будут данные!")
         return ConversationHandler.END
         
-    orders[uid]['cg_missing_idx'] = missing_idx
-    kb = [[InlineKeyboardButton("🟡 Мешок ($5)", callback_data='cg_pack_sack')], [InlineKeyboardButton("📦 Уголки ($6)", callback_data='cg_pack_corners')], [InlineKeyboardButton("🪵 Обрешетка ($8)", callback_data='cg_pack_wood')]]
-    await update.message.reply_text(f"Выбери тип упаковки для товара **{cargo_drafts[uid][cid]['items'][missing_idx]['name']}**:", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
-    return CG_PACK
+    elif query.data == 'cg_calc':
+        cid = orders[uid]['active_cargo_id']
+        draft = cargo_drafts[uid][cid]
+        missing = [i['name'] for i in draft['items'] if i['pieces'] == 0]
+        if missing:
+            await query.edit_message_text(f"⏳ Не хватает габаритов для: {', '.join(missing)}.\nПартия сохранена в черновик!")
+            return ConversationHandler.END
 
-async def cg_calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    await update.callback_query.message.reply_text("1️⃣ Введи Тариф Карго (себестоимость, $/кг):")
-    return CG_T_CARGO
+        t_weight = sum(i['weight'] for i in draft['items'])
+        t_vol = sum(i['dims'][0] for i in draft['items'])
+        t_pieces = sum(i['pieces'] for i in draft['items'])
+        density = int(t_weight / t_vol) if t_vol > 0 else 0
+        msg = f"📦 **СВОДКА ДЛЯ КАРГО:**\n• Общий вес: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces}\n• Плотность: {density} кг/м³\n\n*Скинь это менеджеру Карго, чтобы узнать тариф.*"
+        await query.edit_message_text(msg, parse_mode='Markdown')
+        await query.message.reply_text("1️⃣ Введи **Тариф Карго** (твоя себестоимость, $/кг):", parse_mode='Markdown')
+        return CG_T_CARGO
 
 async def cg_t_cargo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    try:
-        orders[uid]['cg_tc'] = float(update.message.text.replace(',', '.'))
-    except:
-        await update.message.reply_text("❌ Пожалуйста, введи число:")
-        return CG_T_CARGO
+    try: orders[uid]['cg_tc'] = float(update.message.text.replace(',', '.'))
+    except: await update.message.reply_text("❌ Введи число:"); return CG_T_CARGO
     await update.message.reply_text("2️⃣ Введи Тариф для Клиента ($/кг):")
     return CG_T_CLIENT
 
 async def cg_t_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    try:
-        orders[uid]['cg_tcl'] = float(update.message.text.replace(',', '.'))
-    except:
-        await update.message.reply_text("❌ Пожалуйста, введи число:")
-        return CG_T_CLIENT
+    try: orders[uid]['cg_tcl'] = float(update.message.text.replace(',', '.'))
+    except: await update.message.reply_text("❌ Введи число:"); return CG_T_CLIENT
     await update.message.reply_text("3️⃣ Введи Курс USD → CNY:")
     return CG_R_CNY
 
 async def cg_r_cny(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    try:
-        orders[uid]['cg_rcny'] = float(update.message.text.replace(',', '.'))
-    except:
-        await update.message.reply_text("❌ Пожалуйста, введи число:")
-        return CG_R_CNY
+    try: orders[uid]['cg_rcny'] = float(update.message.text.replace(',', '.'))
+    except: await update.message.reply_text("❌ Введи число:"); return CG_R_CNY
     await update.message.reply_text("4️⃣ Введи Курс CNY → AMD:")
     return CG_R_AMD
 
 async def cg_r_amd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    try:
-        orders[uid]['cg_ramd'] = float(update.message.text.replace(',', '.'))
-    except:
-        await update.message.reply_text("❌ Пожалуйста, введи число:")
-        return CG_R_AMD
-        
+    try: orders[uid]['cg_ramd'] = float(update.message.text.replace(',', '.'))
+    except: await update.message.reply_text("❌ Введи число:"); return CG_R_AMD
+
     cid = orders[uid]['active_cargo_id']
     draft = cargo_drafts[uid][cid]
-    
+
     t_weight = sum(i['weight'] for i in draft['items'])
     t_vol = sum(i['dims'][0] for i in draft['items'])
     t_pieces = sum(i['pieces'] for i in draft['items'])
     pack_cost = sum(i['pieces'] * i['pack_price'] for i in draft['items'])
     unload_cost = t_pieces * 4.0
-    
+
     client_weight_usd = t_weight * orders[uid]['cg_tcl']
     client_total_usd = client_weight_usd + pack_cost + unload_cost
     client_total_amd = int(client_total_usd * orders[uid]['cg_rcny'] * orders[uid]['cg_ramd'])
-    
+
     cargo_total_usd = (t_weight * orders[uid]['cg_tc']) + pack_cost + unload_cost
     cargo_total_cny = int(cargo_total_usd * orders[uid]['cg_rcny'])
-    
+
     profit_amd = client_total_amd - int(cargo_total_cny * orders[uid]['cg_ramd'])
-    
+
     draft.update({'t_weight': t_weight, 't_vol': t_vol, 't_pieces': t_pieces, 'density': int(t_weight/t_vol) if t_vol>0 else 0, 'tc': orders[uid]['cg_tc'], 'tcl': orders[uid]['cg_tcl'], 'rcny': orders[uid]['cg_rcny'], 'ramd': orders[uid]['cg_ramd'], 'client_amd': client_total_amd, 'cargo_cny': cargo_total_cny, 'profit_amd': profit_amd})
-    
-    msg_client = f"""🚛 **CARGO INVOICE: {draft['client'].upper()}**\n🏷 {draft['label']}\n\n**ПАРАМЕТРЫ ГРУЗА:**\n• Вес брутто: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces} шт\n\n**РАСЧЕТ СТОИМОСТИ:**\n• Доставка ({t_weight} кг × ${orders[uid]['cg_tcl']}): ${client_weight_usd:.1f}\n• Упаковка и выгрузка: ${pack_cost + unload_cost:.1f}\n\n💵 Итого логистика: ${client_total_usd:.1f}\n🔄 Конвертация: ${client_total_usd:.1f} × {orders[uid]['cg_rcny']} ¥ × {orders[uid]['cg_ramd']} AMD\n✅ **К ОПЛАТЕ: {client_total_amd:,} AMD**"""
+
+    msg_client = f"🚛 **CARGO INVOICE: {draft['client'].upper()}**\n🏷 {draft['label']}\n\n**ПАРАМЕТРЫ ГРУЗА:**\n• Вес брутто: {t_weight} кг\n• Объем: {t_vol:.2f} м³\n• Мест: {t_pieces} шт\n\n**РАСЧЕТ СТОИМОСТИ:**\n• Доставка ({t_weight} кг × ${orders[uid]['cg_tcl']}): ${client_weight_usd:.1f}\n• Упаковка и выгрузка: ${pack_cost + unload_cost:.1f}\n\n💵 Итого логистика: ${client_total_usd:.1f}\n🔄 Конвертация: ${client_total_usd:.1f} × {orders[uid]['cg_rcny']} ¥ × {orders[uid]['cg_ramd']} AMD\n✅ **К ОПЛАТЕ: {client_total_amd:,} AMD**"
     await update.message.reply_text(msg_client, parse_mode='Markdown')
-    
-    msg_admin = f"""💼 **ВНУТРЕННИЙ РАСЧЕТ ({cid}):**\n\n**1. ОТДАЕМ В КАРГО:**\n• Себестоимость (${orders[uid]['cg_tc']}/кг + Услуги): **${cargo_total_usd:.1f}**\n🇨🇳 **Перевести Карго: {cargo_total_cny:,} ¥** *(по курсу {orders[uid]['cg_rcny']})*\n\n**2. ПРИБЫЛЬ:**\n💰 **ЧИСТАЯ ПРИБЫЛЬ: {profit_amd:,} AMD**"""
-    
+
+    msg_admin = f"💼 **ВНУТРЕННИЙ РАСЧЕТ ({cid}):**\n\n**1. ОТДАЕМ В КАРГО:**\n• Себестоимость (${orders[uid]['cg_tc']}/кг + Услуги): **${cargo_total_usd:.1f}**\n🇨🇳 **Перевести Карго: {cargo_total_cny:,} ¥** *(по курсу {orders[uid]['cg_rcny']})*\n\n**2. ПРИБЫЛЬ:**\n💰 **ЧИСТАЯ ПРИБЫЛЬ: {profit_amd:,} AMD**"
     kb = [[InlineKeyboardButton("📊 Export Excel", callback_data='cg_export_ex')], [InlineKeyboardButton("📑 Export Airtable", callback_data='cg_export_air')], [InlineKeyboardButton("🗑 Завершить и удалить", callback_data='cg_delete')]]
     await update.message.reply_text(msg_admin, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
     return ConversationHandler.END
+
 
 # ======== ОБЩИЙ ОБРАБОТЧИК ЭКСПОРТА ========
 async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1244,10 +1218,6 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'dn_delete':
         await query.edit_message_text(f"{query.message.text}\n\n✅ Расчет отменен и удален.")
 
-def cancel(update, context): 
-    update.message.reply_text("Действие отменено.")
-    return ConversationHandler.END
-
 # ======== MAIN ========
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -1324,24 +1294,19 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
     
-    app.add_handler(CommandHandler('cargo', cmd_cargo))
-    app.add_handler(CallbackQueryHandler(cg_open_draft, pattern='^cg_open_'))
-    
     app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(cg_fill_start, pattern='^cg_fill$')],
+        entry_points=[CommandHandler('cargo', cmd_cargo)],
         states={
-            CG_PACK: [CallbackQueryHandler(cg_pack_cb, pattern='^cg_pack_')], 
-            CG_DIMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, cg_dims_input)]
-        },
-        fallbacks=[CommandHandler('cancel', cancel)]
-    ))
-    
-    app.add_handler(ConversationHandler(
-        entry_points=[CallbackQueryHandler(cg_calc_start, pattern='^cg_calc$')],
-        states={
-            CG_T_CARGO: [MessageHandler(filters.TEXT & ~filters.COMMAND, cg_t_cargo)], 
-            CG_T_CLIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cg_t_client)], 
-            CG_R_CNY: [MessageHandler(filters.TEXT & ~filters.COMMAND, cg_r_cny)], 
+            CG_START: [CallbackQueryHandler(cg_start_cb)],
+            CG_CLIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cg_get_client)],
+            CG_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, cg_get_label)],
+            CG_ITEM_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, cg_get_item_name)],
+            CG_PACK: [CallbackQueryHandler(cg_pack_cb)],
+            CG_DIMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, cg_dims_input)],
+            CG_MORE_ITEMS: [CallbackQueryHandler(cg_more_items_cb)],
+            CG_T_CARGO: [MessageHandler(filters.TEXT & ~filters.COMMAND, cg_t_cargo)],
+            CG_T_CLIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cg_t_client)],
+            CG_R_CNY: [MessageHandler(filters.TEXT & ~filters.COMMAND, cg_r_cny)],
             CG_R_AMD: [MessageHandler(filters.TEXT & ~filters.COMMAND, cg_r_amd)]
         },
         fallbacks=[CommandHandler('cancel', cancel)]
@@ -1349,7 +1314,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$'))
     
-    logger.info("Бот запущен. Версия v70 (FINAL STABLE + CARGO DRAFTS)")
+    logger.info("Бот запущен. Версия v71 (INTERACTIVE CARGO FIXED)")
     app.run_polling()
 
 if __name__ == '__main__': 
