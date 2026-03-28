@@ -224,7 +224,6 @@ async def cmd_audit_gs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"• Курс: {client_rate}\n\n"
         msg += f"✅ <b>ИТОГО К ОПЛАТЕ: {final_total_amd:,} AMD</b>"
         
-        # Отправляем ЕДИНСТВЕННОЕ сообщение без кнопок
         await update.message.reply_text(msg, parse_mode='HTML')
         
     except Exception as e:
@@ -1137,12 +1136,16 @@ async def cg_dims_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not line.strip(): continue
         try:
             nums = tuple(map(float, line.replace(',', '.').split()))
-            if len(nums) < 5: return await update.message.reply_text("❌ Нужно 5 цифр: Кол-во Вес Д Ш В\nПопробуй еще раз:", parse_mode='HTML')
+            if len(nums) < 5: 
+                await update.message.reply_text("❌ Нужно 5 цифр: Кол-во Вес Д Ш В\nПопробуй еще раз:", parse_mode='HTML')
+                return CG_DIMS
             p, w, l, wid, h = int(nums[0]), nums[1], nums[2], nums[3], nums[4]
             if pack_type == 'Уголки': w += 1.0
             elif pack_type == 'Обрешетка': w += 10.0; l += 5; wid += 5; h += 5
             total_pieces += p; total_weight += (p * w); total_vol += (p * (l * wid * h) / 1000000)
-        except: return await update.message.reply_text(f"❌ Ошибка в строке: <code>{line}</code>\nПопробуй еще раз:", parse_mode='HTML')
+        except: 
+            await update.message.reply_text(f"❌ Ошибка в строке: <code>{line}</code>\nПопробуй еще раз:", parse_mode='HTML')
+            return CG_DIMS
 
     cargo_drafts[uid][cid]['items'][idx].update({'pieces': total_pieces, 'weight': total_weight, 'dims': (total_vol, 1, 1)})
     missing_idx = next((i for i, item in enumerate(cargo_drafts[uid][cid]['items']) if item['pieces'] == 0), -1)
@@ -1189,28 +1192,36 @@ async def cg_more_items_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cg_t_cargo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     try: orders[uid]['cg_tc'] = float(update.message.text.replace(',', '.'))
-    except: await update.message.reply_text("❌ Введи число:"); return CG_T_CARGO
+    except: 
+        await update.message.reply_text("❌ Введи число:")
+        return CG_T_CARGO
     await update.message.reply_text("2️⃣ Введи Тариф для Клиента ($/кг):")
     return CG_T_CLIENT
 
 async def cg_t_client(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     try: orders[uid]['cg_tcl'] = float(update.message.text.replace(',', '.'))
-    except: await update.message.reply_text("❌ Введи число:"); return CG_T_CLIENT
+    except: 
+        await update.message.reply_text("❌ Введи число:")
+        return CG_T_CLIENT
     await update.message.reply_text("3️⃣ Введи Курс USD → CNY:")
     return CG_R_CNY
 
 async def cg_r_cny(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     try: orders[uid]['cg_rcny'] = float(update.message.text.replace(',', '.'))
-    except: await update.message.reply_text("❌ Введи число:"); return CG_R_CNY
+    except: 
+        await update.message.reply_text("❌ Введи число:")
+        return CG_R_CNY
     await update.message.reply_text("4️⃣ Введи Курс CNY → AMD:")
     return CG_R_AMD
 
 async def cg_r_amd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     try: orders[uid]['cg_ramd'] = float(update.message.text.replace(',', '.'))
-    except: await update.message.reply_text("❌ Введи число:"); return CG_R_AMD
+    except: 
+        await update.message.reply_text("❌ Введи число:")
+        return CG_R_AMD
 
     cid = orders[uid]['active_cargo_id']
     draft = cargo_drafts[uid][cid]
@@ -1438,7 +1449,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$|^dn_export_airtable$'))
     
-    logger.info("Бот запущен. Версия v78 (NO-FREEZE NOTION & CLEAN CARGO HTML)")
+    logger.info("Бот запущен. Версия v79 (CARGO DIMS BUG & DOUBLE INSTANCE FIXED)")
     app.run_polling()
 
 if __name__ == '__main__': 
