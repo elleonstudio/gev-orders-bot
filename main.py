@@ -82,6 +82,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • /zakaz [Имя] — Ручной пошаговый ввод нового заказа.
 • /paste [Текст] — Создание заказа из текста поставщика.
 • /calc [Текст] — Быстрый калькулятор инвойса.
+• /audit-gs [Текст] — Аудит и генерация чека от Kimi.
 
 ⚙️ <b>СИСТЕМА</b>
 • /cancel — Прервать любое действие и сбросить бота.
@@ -127,38 +128,50 @@ async def cmd_audit_gs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     try:
-        # Убираем возможные скобки, которые ставит Kimi
-        text_clean = text.replace('[', '').replace(']', '')
+        # Убираем команду бота
+        text_clean = re.sub(r'(?i)/audit[-_]gs\s*', '', text).strip()
+        # Убираем квадратные скобки
+        text_clean = text_clean.replace('[', '').replace(']', '')
         
-        # Разрезаем текст на 3 логические части
-        error_split = re.split(r'(❌\s*Найдены ошибки[^\n]*)', text_clean, 1, re.IGNORECASE)
-        if len(error_split) < 3:
-            return await update.message.reply_text("❌ Ошибка формата: Не найден маркер ошибки ❌")
-            
-        original_text = error_split[0].strip()
+        # Ищем маркеры: с ошибками или без
+        error_marker = re.search(r'(❌\s*Найдены ошибки[^\n]*)', text_clean, re.IGNORECASE)
+        success_marker = re.search(r'(✅\s*Ошибок нет[^\n]*)', text_clean, re.IGNORECASE)
+        correction_marker = re.search(r'(✅\s*ИСПРАВЛЕНН[^\n]*)', text_clean, re.IGNORECASE)
+        if not correction_marker:
+            correction_marker = re.search(r'(✅\s*Исправленн[^\n]*)', text_clean, re.IGNORECASE)
+
+        if error_marker:
+            part1 = text_clean[:error_marker.start()].strip()
+            part2_start = error_marker.start()
+        elif success_marker:
+            part1 = text_clean[:success_marker.start()].strip()
+            part2_start = success_marker.start()
+        else:
+            return await update.message.reply_text("❌ Ошибка формата: не найдены маркеры Kimi (❌ Найдены ошибки / ✅ Ошибок нет).")
+
+        if not correction_marker:
+            return await update.message.reply_text("❌ Ошибка формата: не найден маркер исправленного расчета (✅ Исправленная...).")
+
+        original_text = part1
+        error_log = text_clean[part2_start:correction_marker.start()].strip()
+        corrected_text = text_clean[correction_marker.end():].strip().lstrip(':').strip()
         
-        correct_split = re.split(r'(✅\s*Исправленный расчет:?)', error_split[2], 1, re.IGNORECASE)
-        if len(correct_split) < 3:
-            return await update.message.reply_text("❌ Ошибка формата: Не найден маркер ✅ Исправленный расчет")
-            
-        error_log = error_split[1] + correct_split[0].strip()
-        corrected_text = correct_split[2].strip()
-        
-        # Парсим исправленный расчет построчно
-        lines = [line.strip() for line in corrected_text.split('\n') if line.strip()]
+        # Вытаскиваем имя клиента из оригинального текста, игнорируя мусорные фразы
         client_name = "КЛИЕНТ"
-        
-        # Пытаемся вытащить имя клиента из оригинального текста
         orig_lines = [line.strip() for line in original_text.split('\n') if line.strip()]
         for o_line in orig_lines:
-            # Ищем строку без математики, чтобы взять её как имя
-            if not re.search(r'[×x*=/]', o_line) and 'audit' not in o_line.lower() and len(o_line) < 30:
+            ol_lower = o_line.lower()
+            if "проверь" in ol_lower or "audit" in ol_lower:
+                continue
+            if not re.search(r'[×x*=/]', o_line) and len(o_line) < 30:
                 client_name = o_line
                 break
                 
+        # Парсим исправленный расчет
+        lines = [line.strip() for line in corrected_text.split('\n') if line.strip()]
         items = []
         for line in lines:
-            # Ищем формулу товара: 7.5×200+144=1644 vase
+            # Ищем формулу: 7.5×200+144=1644 vase
             m = re.match(r'^([\d\.]+)\s*[×x*]\s*(\d+)(?:\s*\+\s*([\d\.]+))?\s*=\s*[\d\.]+\s+(.+)$', line, re.IGNORECASE)
             if m:
                 price = float(m.group(1))
@@ -167,7 +180,7 @@ async def cmd_audit_gs(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name = m.group(4).strip().title()
                 items.append({'name': name, 'qty': qty, 'price': price, 'delivery_factory': delivery})
                 
-        # Ищем курс клиента (например 2474×58=)
+        # Ищем курс (например 2474×58=)
         client_rate = 58.0
         rate_match = re.search(r'[×x*]\s*([\d\.]+)\s*=(?:\s*|\n|=)', corrected_text)
         if rate_match:
@@ -176,7 +189,7 @@ async def cmd_audit_gs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not items:
             return await update.message.reply_text("❌ Не удалось распознать товары из исправленного расчета. Проверь формулы.")
             
-        # Внутренняя математика (чтобы всё сошлось 1 в 1)
+        # Внутренняя математика
         subtotal_cny = sum((i['price'] * i['qty']) + i['delivery_factory'] for i in items)
         comm_amd_3pct = (subtotal_cny * 0.03) * client_rate
         rule_applied = comm_amd_3pct < 10000
@@ -184,7 +197,7 @@ async def cmd_audit_gs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         actual_comm_amd = 10000 if rule_applied else int(comm_amd_3pct)
         final_total_amd = int((subtotal_cny * client_rate) + actual_comm_amd)
         
-        # Собираем красивый чек клиента
+        # Собираем чек
         inv_lines = ""
         for i in items:
             inv_lines += f"• {i['name']} — {i['qty']} шт\n"
@@ -204,7 +217,7 @@ async def cmd_audit_gs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"• Курс: {client_rate}\n\n"
         msg += f"✅ <b>ИТОГО К ОПЛАТЕ: {final_total_amd:,} AMD</b>"
         
-        # Отправляем единое сообщение без кнопок
+        # Отправляем ЕДИНСТВЕННОЕ сообщение без кнопок
         await update.message.reply_text(msg, parse_mode='HTML')
         
     except Exception as e:
@@ -1326,7 +1339,7 @@ def main():
     app.add_handler(CommandHandler('menu', cmd_menu))
     app.add_handler(CommandHandler('cancel', cancel))
     
-    # Супер-сканер: ловит текст с /audit-gs в любом виде
+    # Супер-сканер: ловит текст с /audit-gs в любом виде, обходит запрет Телеграма на дефисы
     app.add_handler(MessageHandler(filters.TEXT & filters.Regex(re.compile(r'/audit[-_]gs', re.IGNORECASE)), cmd_audit_gs))
     
     app.add_handler(CallbackQueryHandler(guide_open, pattern='^guide_open$'))
@@ -1418,7 +1431,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$|^dn_export_airtable$'))
     
-    logger.info("Бот запущен. Версия v76 (AUDIT-GS PARSER FIXED)")
+    logger.info("Бот запущен. Версия v77 (CLEAN AUDIT-GS PARSER)")
     app.run_polling()
 
 if __name__ == '__main__': 
