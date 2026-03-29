@@ -255,7 +255,7 @@ async def finalize_order(uid, message_obj):
     msg_client = f"""<b>COMMERCIAL INVOICE: {data['client'].upper()}</b>
 📅 Date: {datetime.now().strftime('%d.%m.%Y')}
 
-<b>1. ТОВАРНАЯ ВЕДОМОСТЬ (Logistics Included)</b>
+<b>1. ТОВАРНАЯ ВЕДОМОСТЬ:</b>
 {inv_lines}<code>────────────────────────</code>
 <b>SUBTOTAL:</b> {subtotal_cny:.1f}¥
 
