@@ -17,9 +17,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 NOTION_TOKEN = os.getenv('NOTION_TOKEN')
-NOTION_DATABASE_ID = "3278c4d1fb0e80c4b6e5f261d0631ed2"
 PACKAGES_DATABASE_ID = "32a8c4d1fb0e806ebb98f5995704d0e5"
-CARGO_NOTION_DATABASE_ID = os.getenv('CARGO_NOTION_DB_ID', "СЮДА_ID_БАЗЫ_CARGO") 
 
 BOX_PRICE_CNY = 7.77
 MAX_BOX_WEIGHT = 30.0
@@ -40,9 +38,6 @@ async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYP
 # ======== УТИЛИТЫ ========
 def normalize_client_name(name):
     return re.sub(r'\s+', '', name).strip().capitalize()
-
-def get_code(client):
-    return f"{client.upper()}-{datetime.now().strftime('%y%m%d')}"
 
 def generate_cargo_id():
     import random
@@ -70,30 +65,6 @@ def optimize_boxes_with_weight(items):
             boxes.append({'items': [unit], 'rem_vol': (MAX_L * MAX_W * MAX_H) - unit['vol'], 'cur_weight': unit['weight']})
     return boxes
 
-# Генерируем чистый текст чека для сохранения в Notion
-def generate_plain_invoice(data):
-    subtotal_cny = data.get('total_cny_netto', 0)
-    actual_comm_cny = data.get('actual_comm_cny', 0)
-    final_total_amd = data.get('final_total_amd', 0)
-    rule_applied = data.get('rule_applied', False)
-    
-    inv_lines = ""
-    for i in data.get('items', []):
-        inv_lines += f"• {i['name']} — {i['qty']} шт\n{i['qty']} × {i['price']} + {i.get('delivery_factory', 0)} = {(i['price'] * i['qty']) + i.get('delivery_factory', 0):.1f}¥\n"
-        
-    msg = f"COMMERCIAL INVOICE: {data.get('client', 'Unknown').upper()}\n"
-    msg += f"📅 Date: {datetime.now().strftime('%d.%m.%Y')}\n\n"
-    msg += f"1. ТОВАРНАЯ ВЕДОМОСТЬ\n"
-    msg += f"{inv_lines}────────────────────────\n"
-    msg += f"SUBTOTAL: {subtotal_cny:.1f}¥\n\n"
-    msg += f"2. КОМИССИЯ И СЕРВИС\n"
-    msg += f"({'Минимальная 10000 AMD' if rule_applied else '3%'}): {actual_comm_cny:.1f}¥\n\n"
-    msg += f"3. ИТОГОВЫЙ РАСЧЕТ\n"
-    msg += f"• Всего в юанях: {subtotal_cny + actual_comm_cny:.1f}¥\n"
-    msg += f"• Курс: {data.get('client_rate', 0)}\n\n"
-    msg += f"✅ ИТОГО К ОПЛАТЕ: {final_total_amd:,} AMD"
-    return msg
-
 # ======== ГЛАВНОЕ МЕНЮ И РУКОВОДСТВО ========
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
@@ -120,7 +91,7 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ⚙️ <b>СИСТЕМА</b>
 • /cancel — Прервать любое действие и сбросить бота.
 
-📊 В конце каждого расчета вам доступны кнопки Airtable, Excel и Notion."""
+📊 В конце каждого расчета вам доступны кнопки Airtable и Excel."""
 
     kb = [[InlineKeyboardButton("📖 Открыть подробное руководство", callback_data='guide_open')]]
     
@@ -147,8 +118,8 @@ async def guide_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Напишите <code>/cargo</code>. Считает прибыль между тарифами, накидывает вес упаковки (+1 кг картон, +10 кг дерево).
 
 <b>5. Доставка по РФ (/dostavka и /dostavka_new)</b>
-• <code>/dostavka</code> — продолжает работу с текущим просчитанным клиентом (после /zakaz или /paste). Дает кнопки для обновления Notion и общего инвойса.
-• <code>/dostavka_new</code> — начинает расчет с нуля для нового клиента (внешний груз)."""
+• <code>/dostavka</code> — продолжает работу с текущим просчитанным клиентом.
+• <code>/dostavka_new</code> — начинает расчет с нуля для нового клиента."""
     
     kb = [[InlineKeyboardButton("⬅️ Назад в меню", callback_data='menu_back')]]
     await query.edit_message_text(guide_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
@@ -176,10 +147,10 @@ async def cmd_audit_gs(update: Update, context: ContextTypes.DEFAULT_TYPE):
             part1 = text_clean[:success_marker.start()].strip()
             part2_start = success_marker.start()
         else:
-            return await update.message.reply_text("❌ Ошибка формата: не найдены маркеры Kimi (❌ Найдены ошибки / ✅ Ошибок нет).")
+            return await update.message.reply_text("❌ Ошибка формата: не найдены маркеры Kimi.")
 
         if not correction_marker:
-            return await update.message.reply_text("❌ Ошибка формата: не найден маркер исправленного расчета (✅ Исправленная...).")
+            return await update.message.reply_text("❌ Ошибка формата: не найден маркер исправленного расчета.")
 
         original_text = part1
         error_log = text_clean[part2_start:correction_marker.start()].strip()
@@ -212,7 +183,7 @@ async def cmd_audit_gs(update: Update, context: ContextTypes.DEFAULT_TYPE):
             client_rate = float(rate_match.group(1))
             
         if not items:
-            return await update.message.reply_text("❌ Не удалось распознать товары из исправленного расчета. Проверь формулы.")
+            return await update.message.reply_text("❌ Не удалось распознать товары из исправленного расчета.")
             
         subtotal_cny = sum((i['price'] * i['qty']) + i['delivery_factory'] for i in items)
         comm_amd_3pct = (subtotal_cny * 0.03) * client_rate
@@ -223,19 +194,19 @@ async def cmd_audit_gs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         inv_lines = ""
         for i in items:
-            inv_lines += f"• {i['name']} — {i['qty']} шт\n"
+            inv_lines += f"• {i['name']}: — {i['qty']} шт\n"
             inv_lines += f"{i['qty']} × {i['price']} + {i['delivery_factory']} = {(i['price'] * i['qty']) + i['delivery_factory']:.1f}¥\n"
             
         msg = f"<b>COMMERCIAL INVOICE: {client_name.upper()}</b>\n"
-        msg += f"📅 Date: {datetime.now().strftime('%d.%m.%Y')}\n\n"
+        msg += f"📅 Date: {datetime.now().strftime('%m.%d.%Y')}\n\n"
         msg += f"<b>ОРИГИНАЛЬНЫЙ РАСЧЕТ:</b>\n{original_text}\n\n"
         msg += f"{error_log}\n\n"
-        msg += f"✅ <b>ИСПРАВЛЕННАЯ ТОВАРНАЯ ВЕДОМОСТЬ</b>\n"
+        msg += f"<b>1. ТОВАРНАЯ ВЕДОМОСТЬ:</b>\n"
         msg += f"{inv_lines}<code>────────────────────────</code>\n"
         msg += f"<b>SUBTOTAL:</b> {subtotal_cny:.1f}¥\n\n"
-        msg += f"<b>КОМИССИЯ И СЕРВИС (Service Fee)</b>\n"
+        msg += f"<b>2. КОМИССИЯ И СЕРВИС (Service Fee)</b>\n"
         msg += f"({'Минимальная 10000 AMD' if rule_applied else '3%'}): {actual_comm_cny:.1f}¥\n\n"
-        msg += f"<b>ИТОГОВЫЙ РАСЧЕТ (Convertation)</b>\n"
+        msg += f"<b>3. ИТОГОВЫЙ РАСЧЕТ (Convertation)</b>\n"
         msg += f"• Всего в юанях: {subtotal_cny + actual_comm_cny:.1f}¥\n"
         msg += f"• Курс: {client_rate}\n\n"
         msg += f"✅ <b>ИТОГО К ОПЛАТЕ: {final_total_amd:,} AMD</b>"
@@ -266,11 +237,11 @@ async def finalize_order(uid, message_obj):
     if audit: 
         await message_obj.reply_text("⚠️ <b>Аудит расчета:</b>\n" + "\n".join(audit), parse_mode='HTML')
 
-    inv_lines = "".join([f"• {i['name']} — {i['qty']} шт\n{i['qty']} × {i['price']} + {i.get('delivery_factory', 0)} = {(i['price'] * i['qty']) + i.get('delivery_factory', 0):.1f}¥\n" for i in data['items']])
+    inv_lines = "".join([f"• {i['name']}: — {i['qty']} шт\n{i['qty']} × {i['price']} + {i.get('delivery_factory', 0)} = {(i['price'] * i['qty']) + i.get('delivery_factory', 0):.1f}¥\n" for i in data['items']])
     msg_client = f"""<b>COMMERCIAL INVOICE: {data['client'].upper()}</b>
-📅 Date: {datetime.now().strftime('%d.%m.%Y')}
+📅 Date: {datetime.now().strftime('%m.%d.%Y')}
 
-<b>1. ТОВАРНАЯ ВЕДОМОСТЬ (Logistics Included)</b>
+<b>1. ТОВАРНАЯ ВЕДОМОСТЬ:</b>
 {inv_lines}<code>────────────────────────</code>
 <b>SUBTOTAL:</b> {subtotal_cny:.1f}¥
 
@@ -303,9 +274,9 @@ async def finalize_order(uid, message_obj):
 
 💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {profit_amd:,} AMD</b>"""
 
-    # Убрали Notion из кнопок Внутреннего Расчета
     keyboard = [
-        [InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel'), InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')]
+        [InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')], 
+        [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')]
     ]
 
     await message_obj.reply_text(msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -330,7 +301,7 @@ async def create_excel_invoice(uid):
     output.seek(0)
     return output
 
-# ======== NOTION API ========
+# ======== NOTION API (ТОЛЬКО ДЛЯ FF) ========
 async def get_packages_from_notion():
     if not notion or not PACKAGES_DATABASE_ID: 
         return []
@@ -339,50 +310,6 @@ async def get_packages_from_notion():
         return [{'name': p['properties'].get('Название', {}).get('title', [{}])[0].get('text', {}).get('content', ''), 'price': p['properties'].get('Цена', {}).get('number', 0)} for p in res.get('results', []) if p['properties'].get('Название', {}).get('title') and p['properties'].get('Цена', {}).get('number', 0) > 0]
     except: 
         return []
-
-async def get_client_orders_from_notion(client_name):
-    if not notion or not NOTION_DATABASE_ID: 
-        return None, "Notion не настроен"
-    try:
-        res = await notion.databases.query(database_id=NOTION_DATABASE_ID, sorts=[{"timestamp": "created_time", "direction": "descending"}], page_size=100)
-        client_norm = normalize_client_name(client_name).lower()
-        filtered = [p for p in res.get('results', []) if p['properties'].get('Клиент', {}).get('select', {}) and normalize_client_name(p['properties']['Клиент']['select'].get('name', '')).lower() == client_norm]
-        if not filtered: 
-            return [], None
-        return [{'id': p['id'], 'date': p.get('created_time', '')[:10]} for p in filtered[:5]], None
-    except Exception as e: 
-        return None, str(e)
-
-async def save_to_notion(uid):
-    if not notion: 
-        return None
-    try:
-        data = orders[uid]
-        invoice_text = generate_plain_invoice(data)[:2000] # Ограничение Notion - 2000 символов
-        
-        properties = {
-            "Код заказа": {"title": [{"text": {"content": get_code(data['client'])}}]},
-            "Клиент": {"select": {"name": data['client']}},
-            "Количество": {"number": float(sum(i['qty'] for i in data['items']))},
-            " К ОПЛАТЕ (AMD)": {"number": float(data['final_total_amd'])},
-            "Статус": {"select": {"name": "Новый"}},
-            "Date": {"date": {"start": datetime.now().strftime('%Y-%m-%d')}},
-            "Заказ": {"rich_text": [{"text": {"content": invoice_text}}]}
-        }
-        if 'ff_total_yuan' in data: 
-            properties["ИТОГО (CNY)"] = {"number": float(data['ff_total_yuan'])}
-
-        page_id = data.get('notion_page_id')
-        
-        if page_id: 
-            res = await notion.pages.update(page_id=page_id, properties=properties)
-        else:
-            res = await notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=properties)
-            orders[uid]['notion_page_id'] = res['id']
-            
-        return f"https://notion.so/{res['id'].replace('-', '')}"
-    except: 
-        return None
 
 # ======== СУПЕР-ПАРСЕР /PASTE & /CALC ========
 def parse_paste_text(text):
@@ -469,8 +396,8 @@ async def cmd_calc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data.update({'final_total_amd': final_total_amd, 'total_cny_netto': subtotal_cny, 'rule_applied': rule_applied, 'actual_comm_cny': actual_comm_cny, 'ff_boxes_qty': 0})
     orders[uid] = data
 
-    inv_lines = "".join([f"• {i['name']} — {i['qty']} шт\n{i['qty']} × {i['price']} + {i.get('delivery_factory', 0)} = {(i['price'] * i['qty']) + i.get('delivery_factory', 0):.1f}¥\n" for i in data['items']])
-    msg_client = f"""<b>COMMERCIAL INVOICE: {data['client'].upper()}</b>\n📅 Date: {datetime.now().strftime('%d.%m.%Y')}\n\n<b>1. ТОВАРНАЯ ВЕДОМОСТЬ</b>\n{inv_lines}<code>────────────────────────</code>\n<b>SUBTOTAL:</b> {subtotal_cny:.1f}¥\n\n<b>2. КОМИССИЯ</b>\n({'Минимальная 10000 AMD' if rule_applied else '3%'}): {actual_comm_cny:.1f}¥\n\n<b>3. ИТОГОВЫЙ РАСЧЕТ</b>\n• Всего в юанях: {subtotal_cny + actual_comm_cny:.1f}¥\n• Курс: {data['client_rate']}\n\n✅ <b>ИТОГО К ОПЛАТЕ: {final_total_amd:,} AMD</b>"""
+    inv_lines = "".join([f"• {i['name']}: — {i['qty']} шт\n{i['qty']} × {i['price']} + {i.get('delivery_factory', 0)} = {(i['price'] * i['qty']) + i.get('delivery_factory', 0):.1f}¥\n" for i in data['items']])
+    msg_client = f"""<b>COMMERCIAL INVOICE: {data['client'].upper()}</b>\n📅 Date: {datetime.now().strftime('%m.%d.%Y')}\n\n<b>1. ТОВАРНАЯ ВЕДОМОСТЬ:</b>\n{inv_lines}<code>────────────────────────</code>\n<b>SUBTOTAL:</b> {subtotal_cny:.1f}¥\n\n<b>2. КОМИССИЯ</b>\n({'Минимальная 10000 AMD' if rule_applied else '3%'}): {actual_comm_cny:.1f}¥\n\n<b>3. ИТОГОВЫЙ РАСЧЕТ</b>\n• Всего в юанях: {subtotal_cny + actual_comm_cny:.1f}¥\n• Курс: {data['client_rate']}\n\n✅ <b>ИТОГО К ОПЛАТЕ: {final_total_amd:,} AMD</b>"""
     await update.message.reply_text(msg_client, parse_mode='HTML')
 
     kb = [[InlineKeyboardButton("✍️ Дополнить расчет", callback_data='calc_fill'), InlineKeyboardButton("📊 Export Excel", callback_data='gen_excel')]]
@@ -840,7 +767,7 @@ async def ff_summary_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
     orders[uid]['ff_boxes_qty'] = total_boxes
     
     res = f"📦 <b>Результат FF (Лимит 30кг):</b>\n\nМест: {total_boxes} шт\nОбщий вес: {total_weight:.2f} кг\nСтоимость коробок: {cost:.2f}¥ (по {BOX_PRICE_CNY}¥)\nОбщий итог FF: {orders[uid]['ff_total_yuan']:.2f}¥"
-    kb = [[InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')], [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')], [InlineKeyboardButton("💾 Обновить Notion", callback_data='paste_save_direct')]]
+    kb = [[InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')], [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')]]
     
     await update.message.reply_text(res, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(kb))
     return ConversationHandler.END
@@ -1275,31 +1202,31 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == 'gen_excel':
         try:
             file_stream = await create_excel_invoice(uid)
-            await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(file_stream, filename=f"Invoice_{orders[uid]['client']}.xlsx"))
+            ts = datetime.now().strftime('%H%M%S')
+            await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(file_stream, filename=f"Invoice_{orders[uid]['client']}_{ts}.xlsx"))
         except: 
             await query.message.reply_text("❌ Ошибка Excel.")
             
     elif query.data == 'export_airtable':
         data = orders.get(uid)
-        export_text = f"AIRTABLE_EXPORT_START\nInvoice_ID: {data['client']}\nDate: {datetime.now().strftime('%d.%m.%Y')}\nSum_Client_CNY: {data.get('total_cny_netto', 0)}\nReal_Purchase_CNY: {sum(i.get('purchase', 0) * i.get('qty', 0) for i in data.get('items', []))}\nClient_Rate: {data.get('client_rate', 58.0)}\nReal_Rate: {data.get('real_rate', 55.0)}\nChina_Logistics_CNY: {sum(i.get('delivery_factory', 0) for i in data.get('items', []))}\nFF_Boxes_Qty: {data.get('ff_boxes_qty', 0)}\nAIRTABLE_EXPORT_END"
+        date_str = datetime.now().strftime('%m.%d.%Y')
+        logistics_cny = sum(i.get('delivery_factory', 0) for i in data.get('items', []))
+        export_text = (
+            f"AIRTABLE_EXPORT_START\n"
+            f"Invoice_ID: {data['client']}\n"
+            f"Date: {date_str}\n"
+            f"Sum_Client_CNY: {data.get('total_cny_netto', 0)}\n"
+            f"Client_Rate: {data.get('client_rate', 58.0)}\n"
+            f"Real_Rate: {data.get('real_rate', 55.0)}\n"
+            f"China_Logistics_CNY: {logistics_cny}\n"
+            f"AIRTABLE_EXPORT_END"
+        )
         await query.message.reply_text(f"<code>{export_text}</code>", parse_mode='HTML')
-        
-    elif query.data in ['paste_new', 'paste_update', 'paste_save_direct']:
-        if query.data == 'paste_update': 
-            orders[uid]['notion_page_id'] = orders[uid].get('existing_notion_page_id')
-        elif query.data == 'paste_new': 
-            orders[uid]['notion_page_id'] = None
-            
-        url = await save_to_notion(uid)
-        try: 
-            await query.edit_message_text(f"{query.message.text}\n\n✅ Сохранено:\n{url}" if url else f"{query.message.text}\n\n❌ Ошибка Notion")
-        except: 
-            await query.message.reply_text(f"✅ Сохранено:\n{url}" if url else "❌ Ошибка Notion")
 
     elif query.data == 'cg_export_air':
         cid = orders[uid].get('active_cargo_id')
         draft = cargo_drafts[uid][cid]
-        export_text = f"AIRTABLE_EXPORT_START\nParty_ID: {cid}\nDate: {datetime.now().strftime('%d.%m.%Y')}\nTotal_Weight_KG: {draft['t_weight']}\nTotal_Volume_CBM: {draft['t_vol']:.2f}\nTotal_Pieces: {draft['t_pieces']}\nDensity: {draft['density']}\nPackaging_Type: Сборная\nTariff_Cargo_USD: {draft['tc']}\nTariff_Client_USD: {draft['tcl']}\nRate_USD_CNY: {draft['rcny']}\nRate_USD_AMD: {draft['ramd']}\nTotal_Client_AMD: {draft['client_amd']}\nTotal_Cargo_CNY: {draft['cargo_cny']}\nNet_Profit_AMD: {draft['profit_amd']}\nAIRTABLE_EXPORT_END"
+        export_text = f"AIRTABLE_EXPORT_START\nParty_ID: {cid}\nDate: {datetime.now().strftime('%m.%d.%Y')}\nTotal_Weight_KG: {draft['t_weight']}\nTotal_Volume_CBM: {draft['t_vol']:.2f}\nTotal_Pieces: {draft['t_pieces']}\nDensity: {draft['density']}\nPackaging_Type: Сборная\nTariff_Cargo_USD: {draft['tc']}\nTariff_Client_USD: {draft['tcl']}\nRate_USD_CNY: {draft['rcny']}\nRate_USD_AMD: {draft['ramd']}\nTotal_Client_AMD: {draft['client_amd']}\nTotal_Cargo_CNY: {draft['cargo_cny']}\nNet_Profit_AMD: {draft['profit_amd']}\nAIRTABLE_EXPORT_END"
         await query.message.reply_text(f"<code>{export_text}</code>", parse_mode='HTML')
         
     elif query.data == 'cg_export_ex':
@@ -1315,7 +1242,8 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer: 
             df.to_excel(writer, index=False, sheet_name='Packing_List')
         output.seek(0)
-        await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(output, filename=f"Cargo_{draft['client']}.xlsx"))
+        ts = datetime.now().strftime('%H%M%S')
+        await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(output, filename=f"Cargo_{draft['client']}_{ts}.xlsx"))
 
     elif query.data == 'dn_export_ex':
         items_data = []
@@ -1352,12 +1280,14 @@ async def export_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             writer.sheets['Dostavka_Invoice'].set_column('A:A', 40)
             writer.sheets['Dostavka_Invoice'].set_column('B:D', 18)
         output.seek(0)
-        await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(output, filename=f"Dostavka_{orders[uid]['dn_client']}.xlsx"))
+        ts = datetime.now().strftime('%H%M%S')
+        await context.bot.send_document(chat_id=query.message.chat_id, document=InputFile(output, filename=f"Dostavka_{orders[uid]['dn_client']}_{ts}.xlsx"))
 
     elif query.data == 'dn_export_airtable':
         data = orders.get(uid, {})
         destinations = ", ".join([w['city'] for w in data.get('dn_wh_list', [])])
-        export_text = f"AIRTABLE_DOSTAVKA_START\nClient_ID: {data.get('dn_client', 'Unknown')}\nDate: {datetime.now().strftime('%d.%m.%Y')}\nTotal_Boxes: {data.get('dn_total_boxes', 0)}\nDestinations: {destinations}\nLogistics_RUB: {data.get('dn_total_rub', 0)}\nRate_RUB_AMD: {data.get('dn_rate', 0)}\nTotal_Client_AMD: {data.get('dn_total_amd', 0)}\nAIRTABLE_DOSTAVKA_END"
+        date_str = datetime.now().strftime('%m.%d.%Y')
+        export_text = f"AIRTABLE_DOSTAVKA_START\nClient_ID: {data.get('dn_client', 'Unknown')}\nDate: {date_str}\nTotal_Boxes: {data.get('dn_total_boxes', 0)}\nDestinations: {destinations}\nLogistics_RUB: {data.get('dn_total_rub', 0)}\nRate_RUB_AMD: {data.get('dn_rate', 0)}\nTotal_Client_AMD: {data.get('dn_total_amd', 0)}\nAIRTABLE_DOSTAVKA_END"
         await query.message.reply_text(f"<code>{export_text}</code>", parse_mode='HTML')
 
     elif query.data == 'dn_delete':
@@ -1461,9 +1391,9 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     ))
     
-    app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$|^dn_export_airtable$'))
+    app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$|^dn_export_airtable$'))
     
-    logger.info("Бот запущен. Версия v82 (NO-NOTION-BUTTON FAST MODE)")
+    logger.info("Бот запущен. Версия v83 (PERFECT AIRTABLE & NO NOTION & EXCEL CACHE FIX)")
     app.run_polling()
 
 if __name__ == '__main__': 
