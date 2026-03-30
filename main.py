@@ -303,15 +303,10 @@ async def finalize_order(uid, message_obj):
 
 💰 <b>ЧИСТАЯ ПРИБЫЛЬ: {profit_amd:,} AMD</b>"""
 
-    client_orders, _ = await get_client_orders_from_notion(data['client'])
-    keyboard = [[InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel')], [InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')]]
-    
-    if client_orders:
-        orders[uid]['existing_notion_page_id'] = client_orders[0]['id']
-        msg_admin += f"\n\n⚠️ <b>Клиент найден в базе!</b> (Заказ от: {client_orders[0].get('date')})"
-        keyboard.append([InlineKeyboardButton("🔄 Обновить старый", callback_data='paste_update'), InlineKeyboardButton("➕ Создать НОВЫЙ", callback_data='paste_new')])
-    else:
-        keyboard.append([InlineKeyboardButton("💾 Сохранить в Notion", callback_data='paste_new')])
+    # Убрали Notion из кнопок Внутреннего Расчета
+    keyboard = [
+        [InlineKeyboardButton("📊 Excel Инвойс", callback_data='gen_excel'), InlineKeyboardButton("📑 Export Airtable", callback_data='export_airtable')]
+    ]
 
     await message_obj.reply_text(msg_admin, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1035,8 +1030,7 @@ async def dn_get_rate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if orders[uid].get('is_linked_dostavka'):
         kb = [
             [InlineKeyboardButton("🚚 Excel Доставка", callback_data='dn_export_ex'), InlineKeyboardButton("📊 Excel Товары", callback_data='gen_excel')],
-            [InlineKeyboardButton("📑 Airtable Товары", callback_data='export_airtable'), InlineKeyboardButton("📑 Airtable Доставка", callback_data='dn_export_airtable')],
-            [InlineKeyboardButton("💾 Обновить Notion", callback_data='paste_save_direct')]
+            [InlineKeyboardButton("📑 Airtable Товары", callback_data='export_airtable'), InlineKeyboardButton("📑 Airtable Доставка", callback_data='dn_export_airtable')]
         ]
     else:
         kb = [
@@ -1469,7 +1463,7 @@ def main():
     
     app.add_handler(CallbackQueryHandler(export_handler, pattern='^gen_excel$|^export_airtable$|^paste_new$|^paste_update$|^paste_save_direct$|^cg_export_|^cg_delete$|^dn_export_ex$|^dn_delete$|^dn_export_airtable$'))
     
-    logger.info("Бот запущен. Версия v81 (AIRTABLE QTY FIX & NOTION INVOICE SAVING)")
+    logger.info("Бот запущен. Версия v82 (NO-NOTION-BUTTON FAST MODE)")
     app.run_polling()
 
 if __name__ == '__main__': 
